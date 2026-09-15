@@ -1,158 +1,379 @@
-# MentorHub — 教育场景的 AI 多智能体辅助平台
+# MentorHub
 
-> 面向 IT 教育培训机构的 AI 原生教学辅助系统。  
-> 基于 **LangChain 1.2.10 + LangGraph 1.0.9 + FastAPI** 构建，核心大模型为 **DeepSeek-V3 / DeepSeek-Coder-V2**。
+> 基于 LangGraph 构建的教育场景多智能体辅助平台，覆盖课程知识问答、试卷批改、简历评审与模拟面试。
 
----
+MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将不同教学任务拆分为独立 Agent，并通过统一的 Orchestrator 进行调用与编排；其中课程问答模块实现了完整的 RAG 检索链路，简历评审模块实现了多维并行评审与结构化诊断。
 
-## 项目背景
+## 核心功能
 
-IT 教培机构每天面对四类重复性高、耗费师资的业务：
-
-| 场景 | 痛点 |
-|------|------|
-| 学员答疑 | 同类问题反复出现，老师精力有限 |
-| 试卷批改 | 量大、主观题评分容易不一致 |
-| 简历审查 | 老师无暇逐份精读打分 |
-| 技术面试 | 缺少随时可陪练并给出专业反馈的「面试官」 |
-
-MentorHub 将这四类业务分别封装为独立的 AI Agent，每个 Agent 融合了企业私有知识、内置了完整业务流程、并配备了工程化容错机制。
+| 模块 | 主要能力 | 关键实现 |
+| --- | --- | --- |
+| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query 分类、Query Rewrite、HyDE、Multi Query、Hybrid Retrieval、BGE Rerank、MCP Web Search、Memory |
+| **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
+| **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
+| **Interview · 模拟面试** | 多阶段技术面试、回答评价、追问与最终报告 | LangGraph 状态流转、分阶段对话、回答评估、会话记忆 |
 
 ---
 
-## 四大核心 Agent
+## 1. KnowFlow：课程知识问答 RAG Agent
 
-| Agent | 业务能力 | 核心技术范式 |
-|-------|---------|------------|
-| **智能问答（QA）** | 基于课程知识库实时答疑 | RAG 混合检索 + BGE-M3 + Reranker 精排 + SSE 流式 |
-| **试卷批改（Exam）** | 自动批改选择题 / 简答题 / 编程题 | 三轨并行批改 + HitL 教师确认环 |
-| **简历审查（Resume）** | 六维度评分并给出改进建议 | PDF 解析 + 结构化抽取 + 多维度并行评分 |
-| **模拟面试（Interview）** | 五阶段全程技术面试陪练 | 状态机对话 + Think Tool 双轨质量评估 |
+KnowFlow 是 MentorHub 中的课程知识问答模块。它不是固定走一条 RAG 链，而是先判断问题类型，再选择对应的检索策略。
 
-四个 Agent 之上由 **Orchestrator 编排层**统一做意图路由与多 Agent 串联 Pipeline。
+### 查询路由
+
+QA Agent 首先将问题区分为：
+
+- **General**：通用问题，直接由 LLM 回答；需要实时信息时可调用 Web Search。
+- **Specialized**：课程或专业知识问题，进入 RAG 检索链路。
+
+对于 Specialized Query，会进一步选择不同策略：
+
+- **Precise Retrieval**：问题表达清晰时直接检索。
+- **Query Rewrite**：结合会话历史补全指代、省略信息。
+- **HyDE**：对语义模糊的问题生成 hypothetical document，再用于检索。
+- **Multi Query**：对宽泛问题拆出多个查询，提高召回覆盖率。
+
+### Hybrid Retrieval
+
+当前代码中的混合检索方案为：
+
+```text
+BGE-M3 Query Encoding
+        │
+        ├── Dense Vector ──┐
+        │                  ├── Milvus Hybrid Search
+        └── Sparse Vector ─┘        │
+                            WeightedRanker(0.7, 0.3)
+                                    │
+                              Recall Top-K
+                                    │
+                         BGE-Reranker-v2-m3
+                                    │
+                              Rerank Top-K
+                                    │
+                           LLM Generate Answer
+```
+
+- Embedding：**BGE-M3**
+- Dense：负责语义相似度召回。
+- Sparse：使用 BGE-M3 lexical weights，增强关键词和专有名词匹配。
+- Vector DB：**Milvus**
+- Fusion：`WeightedRanker(0.7, 0.3)`，Dense / Sparse 权重分别为 0.7 / 0.3。
+- Reranker：**BGE-Reranker-v2-m3** Cross Encoder。
+- Hybrid Recall：默认 Top 10。
+- Rerank：默认保留 Top 3。
+
+当 Reranker Top-1 置信度低于代码设定阈值时，QA Agent 可以进入 Web Search 兜底链路。
+
+### 多轮记忆
+
+QA / Interview 使用 LangGraph `MemorySaver` 保存会话状态，并实现：
+
+- 最近 **10 轮**对话滑动窗口；
+- 旧历史按批次进行增量摘要；
+- 最近窗口始终保留原始消息，减少重复摘要与上下文膨胀。
+
+---
+
+## 2. ResumePilot：智能简历评审 Agent
+
+ResumePilot 将简历处理拆成一条 LangGraph Workflow：
+
+```text
+PDF
+ │
+ ├─ Extract Text
+ ├─ Structured Extraction
+ ├─ Six-Dimension Review
+ ├─ Think
+ ├─ Diagnose Issues
+ ├─ Generate Summary
+ └─ Save Results
+```
+
+### 六维度并行评审
+
+当前实现包含六个评审维度：
+
+- 项目深度
+- 技术匹配度
+- 表达规范性
+- 简历结构
+- 量化程度
+- 描述一致性
+
+六个维度通过 `asyncio.gather` 并行调用模型，随后按照预设权重计算综合评分。
+
+### Think → Diagnose
+
+在生成正式问题清单之前，系统先进行一次宏观分析，识别：
+
+- 重复或相互关联的问题；
+- 多个表面问题背后的共同原因；
+- 应优先解决的核心问题。
+
+然后再通过 Structured Output 生成结构化诊断结果和改进建议，减少直接逐条诊断带来的重复与碎片化。
+
+---
+
+## 3. Exam：智能试卷批改 Agent
+
+Exam Agent 将题目按类型拆成三条批改轨道，并并行执行：
+
+```text
+                ┌─ 客观题：规则匹配
+试卷解析 ───────┼─ 简答题：LLM 语义评分
+                └─ 代码题：LLM 代码质量评估
+                         │
+                    聚合批改结果
+                         │
+                    薄弱知识点分析
+                         │
+                     教师复核 HitL
+                         │
+                       发布结果
+```
+
+其中：
+
+- 单选、多选、判断题优先使用确定性规则评分；
+- 简答题通过结构化 LLM 进行语义评分；
+- 代码题由 LLM 根据题目、参考答案与学生代码进行评价；
+- 低置信度结果会标记 `needs_review`，交由教师复核；
+- 最后根据错题与知识标签生成薄弱点分析。
+
+---
+
+## 4. Interview：模拟面试 Agent
+
+Interview Agent 使用 LangGraph 管理面试状态，主要流程包括：
+
+```text
+Load Context
+    ↓
+Check Stage
+    ↓
+Evaluate Answer
+    ↓
+Generate Response / Follow-up
+    ↓
+Save Memory
+    ↓
+Generate Final Report
+```
+
+系统可以根据当前面试阶段生成问题、评价回答并继续追问，在结束后生成面试报告并保存结果。
+
+---
+
+## Agent 编排
+
+四个业务 Agent 由 `backend/core/orchestrator.py` 提供统一调用入口。
+
+当前支持：
+
+- **Single Agent**：直接调用指定 Agent；
+- **Pipeline**：多个 Agent 串联执行；
+- 当前已定义 `job_preparation` Pipeline：`Resume → Interview`。
+
+每个 Agent 内部仍保持独立的 State 与 LangGraph Workflow，避免不同业务状态相互污染。
 
 ---
 
 ## 技术栈
 
-| 层面 | 选型 |
-|------|------|
-| 开发语言 | Python 3.11（严格锁定） |
-| Web 框架 | FastAPI + SSE-Starlette |
-| Agent 框架 | LangChain 1.2.10 + LangGraph 1.0.9 |
-| 主力大模型 | DeepSeek-V3（问答 / 简历 / 面试）|
-| 代码批改模型 | DeepSeek-Coder-V2 |
-| 向量数据库 | Milvus |
-| 关系数据库 | PostgreSQL + SQLAlchemy（全异步）|
-| 缓存 | Redis |
-| 对象存储 | MinIO |
-| 嵌入模型 | BGE-M3（进程内，dense + sparse 双输出）|
-| 精排模型 | BGE-Reranker-large（进程内）|
-| 意图分类 | MiniLM-L6-v2（进程内）|
-| 前端 | Vue3 + TypeScript + Element Plus |
+### Backend
 
-> BGE-M3、BGE-Reranker、MiniLM **三个本地模型均为进程内调用**，无需单独起服务，启动时随后端进程并行预热。
+| 类型 | 技术 |
+| --- | --- |
+| Language | Python 3.11 |
+| API | FastAPI 0.117.1 / Uvicorn |
+| Agent Framework | LangChain 1.2.10 / LangGraph 1.0.9 |
+| Structured Data | Pydantic 2 |
+| Relational DB | PostgreSQL 15 / SQLAlchemy Async |
+| Vector DB | Milvus 2.4 |
+| Embedding | BGE-M3 |
+| Reranker | BGE-Reranker-v2-m3 |
+| Model Runtime | Transformers / Sentence Transformers / FlagEmbedding / PyTorch |
+| Document Parsing | pdfplumber / PyMuPDF / python-docx |
+| Tool Protocol | MCP |
 
----
+LLM 调用统一通过 `backend/core/llm_factory.py` 管理，并使用 OpenAI-compatible 接口进行模型接入。
 
-## 系统架构
+### Frontend
 
-```
-┌─────────────────────────────────────────────────┐
-│              前端层   Vue3 SPA (:3000)            │
-└────────────────────┬────────────────────────────┘
-                     │ HTTP / SSE
-┌────────────────────▼────────────────────────────┐
-│            API 层   FastAPI (:8000)              │
-│          JWT 鉴权 / SSE 流式 / 文件上传            │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│          编排层   Orchestrator                   │
-│    MiniLM 意图识别 → 单 Agent 路由 / Pipeline     │
-└──────┬───────────┬───────────┬───────────┬──────┘
-       │           │           │           │
-  ┌────▼───┐  ┌───▼────┐  ┌───▼────┐  ┌───▼──────┐
-  │  QA    │  │  Exam  │  │Resume  │  │Interview │  ← LangGraph StateGraph × 4
-  │ Agent  │  │ Agent  │  │ Agent  │  │  Agent   │
-  └────────┘  └────────┘  └────────┘  └──────────┘
-                       公共层
-       ├── LLM Factory（DeepSeek API 统一封装）
-       ├── BGE-Reranker / MiniLM / MemorySaver
-       └── MCP Server（知识库检索 + Web 搜索）
-                     │
-┌────────────────────▼────────────────────────────┐
-│   数据层   PostgreSQL · Redis · Milvus · MinIO   │
-└─────────────────────────────────────────────────┘
-```
+- Vue 3
+- TypeScript
+- Vite
+- Element Plus
+- Pinia
+- Axios
+- Markdown-It
+- Highlight.js
 
 ---
 
-## 环境要求
+## 项目结构
 
-- Python **3.11**（严格锁定，不兼容其他版本）
-- Conda（推荐用于环境隔离）
-- Docker & Docker Compose
-- DeepSeek API Key
+```text
+MentorHub/
+├─ backend/
+│  ├─ main.py                  # FastAPI 入口
+│  ├─ config.py                # 环境配置
+│  ├─ api/
+│  │  └─ v1/                   # auth / chat / qa / exam / resume / interview
+│  ├─ agents/
+│  │  ├─ qa/                   # KnowFlow RAG Agent
+│  │  ├─ exam/                 # 试卷批改 Agent
+│  │  ├─ resume/               # ResumePilot
+│  │  └─ interview/            # 模拟面试 Agent
+│  ├─ core/
+│  │  ├─ orchestrator.py       # Agent 编排
+│  │  ├─ llm_factory.py        # LLM 统一工厂
+│  │  ├─ knowledge_base.py     # BGE-M3 + Milvus Hybrid Retrieval
+│  │  ├─ reranker.py           # BGE Reranker
+│  │  ├─ query_classifier.py   # QA Query 二分类
+│  │  ├─ memory.py             # 多轮上下文与摘要
+│  │  └─ retry.py              # 重试 / 降级
+│  ├─ mcp/
+│  │  ├─ knowledge_base_server.py
+│  │  └─ web_search_server.py
+│  └─ db/
+├─ frontend/
+│  └─ src/
+├─ scripts/
+│  ├─ init_db.sql
+│  ├─ init_milvus.py
+│  ├─ build_knowledge_base.py
+│  ├─ seed_data.py
+│  └─ seed_standard_exam.py
+├─ tests/
+│  └─ resume/
+├─ docker-compose.yml
+├─ requirments.txt
+└─ .env.example
+```
 
 ---
 
 ## 快速开始
 
-### 1. 克隆项目 & 创建环境
+### 1. 克隆仓库
 
 ```bash
 git clone https://github.com/LIWED/MentorHub.git
 cd MentorHub
+```
 
-conda create -n edu_agent python=3.11 -y
-conda activate edu_agent
+### 2. 创建 Python 环境
+
+推荐使用 Python 3.11：
+
+```bash
+conda create -n mentorhub python=3.11 -y
+conda activate mentorhub
 pip install -r requirments.txt
 ```
 
-### 2. 配置环境变量
+> 当前仓库依赖文件名为 `requirments.txt`，请按仓库中的实际文件名安装。
+
+### 3. 配置环境变量
+
+Windows PowerShell：
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+Linux / macOS：
 
 ```bash
 cp .env.example .env.local
 ```
 
-打开 `.env.local`，填写必填项：
+至少需要根据本地环境配置：
 
 ```ini
+DB_HOST=localhost
+DB_PORT=5433
+DB_NAME=your_db_name
 DB_USER=your_db_user
 DB_PASSWORD=your_db_password
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
-JWT_SECRET_KEY=any-random-secret-string
+
+MILVUS_HOST=localhost
+MILVUS_PORT=19531
+
+DEEPSEEK_API_KEY=your_api_key
+JWT_SECRET_KEY=your_random_secret
+
+# QA 联网搜索需要时配置
+TAVILY_API_KEY=your_tavily_key
 ```
 
-### 3. 启动基础设施
+### 4. 启动基础设施
+
+当前 `docker-compose.yml` 包含：
+
+- PostgreSQL
+- etcd
+- MinIO（作为 Milvus 内部对象存储）
+- Milvus
+- Attu
+
+启动：
 
 ```bash
-docker-compose --env-file .env.local up -d postgres redis minio etcd milvus langfuse
+docker compose --env-file .env.local up -d
 ```
 
-### 4. 初始化数据（首次运行）
+### 5. 初始化 Milvus
 
 ```bash
-python scripts/init_minio.py        # 创建 MinIO Bucket
-python scripts/init_milvus.py       # 创建 Milvus Collection
-python scripts/seed_data.py         # 写入测试用户与试卷数据
+python scripts/init_milvus.py
 ```
 
-### 5. 验证环境
+如需测试数据，可按需执行：
 
 ```bash
-python scripts/verify_env.py
+python scripts/seed_data.py
+python scripts/seed_standard_exam.py
 ```
 
-### 6. 启动后端
+### 6. 导入知识库文档
+
+当前 `scripts/build_knowledge_base.py` 通过脚本底部常量配置导入参数。首次使用前修改：
+
+```python
+FILE_PATH = r"<PDF 或 Markdown 文档路径>"
+COURSE_ID = "<课程 UUID>"
+DOCUMENT_ID = None
+TENANT_ID = "tenant_default"
+USE_CONTEXT = True
+```
+
+然后执行：
 
 ```bash
-# 在项目根目录（MentorHub/）下执行
+python scripts/build_knowledge_base.py
+```
+
+当前脚本支持 `.pdf`、`.md`、`.markdown`。`USE_CONTEXT=True` 时会先进行 Contextual RAG 上下文增强，再生成 BGE-M3 Dense / Sparse 向量并写入 Milvus。
+
+### 7. 启动后端
+
+在项目根目录执行：
+
+```bash
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 7. 启动前端
+API 文档：
+
+```text
+http://localhost:8000/docs
+```
+
+### 8. 启动前端
 
 ```bash
 cd frontend
@@ -160,168 +381,77 @@ npm install
 npm run dev
 ```
 
+前端默认运行在：
+
+```text
+http://localhost:3000
+```
+
 ---
 
-## 服务端口
+## 本地服务端口
 
 | 服务 | 端口 | 说明 |
-|------|------|------|
-| FastAPI 后端 | **8000** | REST + SSE 接口，`/docs` 查看 Swagger |
-| Vue3 前端 | **3000** | 学员 / 教师 / 管理员界面 |
-| PostgreSQL | **5433** | 宿主机 5432 已占用，隔离到 5433 |
-| Redis | **6380** | 宿主机 6379 已占用 |
-| MinIO API | **9002** | 宿主机 9000 已占用 |
-| MinIO 控制台 | **9003** | 对象存储管理 |
-| Milvus | **19531** | 宿主机 19530 已占用 |
-| Langfuse | **3001** | LLM 调用追踪与可观测性 |
+| --- | ---: | --- |
+| MentorHub Frontend | 3000 | Vue 3 / Vite |
+| FastAPI | 8000 | REST / SSE / Swagger |
+| PostgreSQL | 5433 | Docker 映射到容器 5432 |
+| Milvus | 19531 | Docker 映射到容器 19530 |
+| Attu | 30000 | Milvus 可视化管理界面 |
 
-> 所有连接配置统一从 `.env.local` 读取，**禁止硬编码端口号**。
+> 当前 Compose 中 etcd 与 MinIO 仅供 Milvus 容器内部访问，没有暴露宿主机端口。
 
 ---
 
-## 访问地址 & 测试账号
+## API 与 MCP
 
-| 地址 | 说明 |
-|------|------|
-| http://localhost:3000 | 前端应用 |
-| http://localhost:8000/docs | FastAPI 接口文档（Swagger） |
-| http://localhost:3001 | Langfuse 可观测性平台 |
-| http://localhost:9003 | MinIO 控制台 |
+业务 API 统一挂载在 `/api/v1`：
 
-| 角色 | 密码 |
-|------|------|
-| student | Student@123456 |
-| teacher | Teacher@123456 |
-| admin | Admin@123456 |
-
----
-
-## 目录结构
-
-```
-MentorHub/
-├── backend/
-│   ├── main.py                  # FastAPI 入口 & lifespan（模型预热 + DB 迁移）
-│   ├── config.py                # pydantic-settings 配置（从 .env.local 读取）
-│   ├── dependencies.py          # JWT 鉴权依赖注入
-│   ├── api/v1/                  # 路由：qa / exam / resume / interview / auth
-│   ├── agents/                  # 四大 Agent
-│   │   ├── qa/                  # graph.py / nodes.py / state.py / prompts.py
-│   │   ├── exam/
-│   │   ├── resume/
-│   │   └── interview/
-│   ├── core/
-│   │   ├── llm_factory.py       # LLM 统一工厂（DeepSeek via OpenAI 兼容接口）
-│   │   ├── orchestrator.py      # 编排器（意图路由 + Pipeline）
-│   │   ├── knowledge_base.py    # BGE-M3 向量检索
-│   │   ├── reranker.py          # BGE-Reranker 精排
-│   │   ├── memory.py            # MemorySaver 对话记忆管理
-│   │   └── retry.py             # 三层兜底重试
-│   ├── db/migrations.py         # 启动时自动执行的幂等 DDL 补丁
-│   └── mcp/                     # MCP Server（知识库检索 + Web 搜索）
-├── frontend/src/
-│   ├── views/                   # 页面（qa / exam / resume / interview / login）
-│   ├── api/                     # HTTP 客户端封装
-│   └── stores/                  # Pinia 状态管理
-├── models/                      # 本地模型权重（.gitignore，启动时自动下载）
-│   ├── reranker/bge-reranker-large/
-│   ├── classifier/all-MiniLM-L6-v2/
-│   └── embedding/bge-m3/
-├── scripts/
-│   ├── init_milvus.py           # 初始化向量集合
-│   ├── seed_data.py             # 填充测试数据
-│   ├── build_knowledge_base.py  # 导入知识库文档
-│   └── verify_env.py            # 环境自检
-├── tests/                       # 单元测试 + 集成测试（76 passed / 1 skipped）
-├── requirments.txt
-├── docker-compose.yml
-└── .env.example
+```text
+/api/v1/auth
+/api/v1/chat
+/api/v1/qa
+/api/v1/exam
+/api/v1/resume
+/api/v1/interview
 ```
 
+项目同时挂载两个 MCP 子应用：
+
+```text
+/mcp/kb
+/mcp/web-search
+```
+
+分别用于知识库能力和联网搜索能力的标准化接入。
+
 ---
 
-## 知识库导入
+## 测试
 
-首次使用或知识库重建后，需手动导入课程文档：
+当前仓库已有 ResumePilot 相关测试：
 
 ```bash
-# 重建 Milvus Collection（Phase D 后需执行）
-python scripts/init_milvus.py
-
-# 导入文档（支持 PDF / Word / Markdown）
-python scripts/build_knowledge_base.py --file <文档路径> --course_id <课程UUID>
+pytest tests/resume -q
 ```
+
+此外，`backend/api/v1/` 下保留了 QA、Exam、Resume、Interview 的 E2E 验证脚本，可用于单独检查各业务链路。
 
 ---
 
-## 容错机制
+## 当前实现说明
 
-系统内置三层兜底，任何情况下用户都能拿到响应：
+MentorHub 仍处于持续开发阶段。README 以当前仓库代码为准，重点展示已经落地的 Agent Workflow、RAG 检索链路与工程结构，不将规划中的能力写成已完成功能。
 
-| 层级 | 触发条件 | 处理方式 |
-|------|---------|---------|
-| 第一层：自动重试 | 网络抖动 / LLM 超时 | 间隔 1s / 3s 重试，最多 2 次 |
-| 第二层：Agent 降级 | 重试后仍失败 | 问答直答 / 批改跳过 Judge0 / 简历给格式提示 / 面试给基础反馈 |
-| 第三层：系统兜底 | 所有降级均失败 | 友好提示 + 已完成结果持久化 + 错误记录 |
+如果运行环境、模型或基础设施配置发生变化，请优先检查：
 
----
-
-## 常见问题
-
-**Q: 后端启动报 `extra inputs are not permitted`**
-
-`.env.local` 中保留旧字段没有问题，`config.py` 已设置 `extra = "ignore"` 自动忽略。
-
-**Q: Milvus 连接超时**
-
-确认 etcd 和 milvus-standalone 容器均已 healthy：
-
-```bash
-docker-compose ps | grep -E "milvus|etcd"
-```
-
-**Q: 前端 SSE 无流式效果**
-
-QA 和面试的 SSE 接口直连 `http://localhost:8000`，不经过 Vite proxy，属于正常设计。
-
-**Q: 模拟面试如何快速结束？**
-
-点击输入框右侧的**"结束面试"**按钮，AI 将跳过剩余阶段直接生成报告（约 10-30 秒）。
-
-**Q: 试卷批改一直显示"AI 批改中"**
-
-批改为后台异步任务，刷新页面可获取最新状态。若超过 15 分钟未完成，记录将自动标记为 `failed`，可重新提交。
-
----
-
-## 配套课件
-
-完整学习课件位于 `MentorHub课件/` 目录，共 10 章：
-
-| 章节 | 内容 |
-|------|------|
-| 第一章 | 项目简介与 Agent 核心概念 |
-| 第二章 | 工具介绍（async / Pydantic / LangChain / LangGraph / FastAPI）|
-| 第三章 | 环境搭建与工程地基 |
-| 第四章 | 简历审查 Agent |
-| 第五章 | RAG 智能问答系统 |
-| 第六章 | 试卷批改 Agent（含 HitL）|
-| 第七章 | 模拟面试 Agent |
-| 第八章 | 系统集成与编排 |
-| 第九章 | 前端集成扩展 |
-| 第十章 | 收尾、能力迁移与面试题集 |
-
-生成 HTML 讲义：
-
-```bash
-# 在 docs/ 目录下执行
-mkdocs serve   # 本地预览（:8080）
-mkdocs build   # 输出静态 HTML 到 site/
-```
+- `.env.example`
+- `backend/config.py`
+- `backend/core/llm_factory.py`
+- `docker-compose.yml`
 
 ---
 
 ## License
 
-本项目仅供教学使用，未经授权不得用于商业目的。  
-© 黑马程序员
+本项目主要用于学习、课程实践与 AI Agent / RAG 工程研究。

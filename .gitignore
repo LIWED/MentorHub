@@ -69,6 +69,7 @@ pnpm-debug.log*
 *.sqlite3
 
 # ===== 9. 本地工具产物 =====
+docs/
 .codegraph/
 .superpowers/
 .reasonix/
