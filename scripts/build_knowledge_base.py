@@ -131,6 +131,9 @@ import uuid
 import sys
 from pathlib import Path
 
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # 把项目根目录加入 Python 路径，使得 build_knowledge_base.py 能 import backend.*
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -162,7 +165,7 @@ def embed_chunks(
         version:     课程版本号
 
     Returns:
-        list[DocumentChunk]，每项包含 dense + sparse 向量，可直接写入 Milvus
+        list[DocumentChunk]，每项包含 BGE-M3 Dense 向量；BM25 稀疏权重在写入前按当前全库语料重新计算
     """
     embedder = BGEMEmbedder.get_instance()   # 单例，首次调用加载模型
     all_doc_chunks: list[DocumentChunk] = []
@@ -170,16 +173,16 @@ def embed_chunks(
     for batch_start in range(0, total, BATCH_SIZE):
         batch = chunks[batch_start: batch_start + BATCH_SIZE]
         texts = [c.page_content for c in batch]
-        # BGE-M3 批量推理：同时拿到 dense 和 sparse
-        dense_vecs, sparse_vecs = embedder.encode(texts, batch_size=BATCH_SIZE)
-        for i, (chunk, dense, sparse) in enumerate(zip(batch, dense_vecs, sparse_vecs)):
+        # BGE-M3 只负责 Dense；BM25 sparse 在写入前按当前全库语料计算
+        dense_vecs = embedder.encode(texts, batch_size=BATCH_SIZE)
+        for i, (chunk, dense) in enumerate(zip(batch, dense_vecs)):
             global_index = batch_start + i    # 在整个文档中的顺序编号
 
             all_doc_chunks.append(DocumentChunk(
                 id=generate_chunk_id(chunk.page_content, document_id, global_index),
                 content=chunk.page_content,
                 embedding=dense,
-                sparse_embedding=sparse,
+                sparse_embedding={},
                 course_id=course_id,
                 document_id=document_id,
                 source_name=chunk.metadata.get("source_name", ""),
@@ -314,7 +317,7 @@ def write_to_milvus(doc_chunks: list[DocumentChunk]) -> None:
     # print(f"  🗑️  删除旧版本 chunk（document_id={document_id[:8]}…）")
     # kb.delete_document_chunks(document_id)
 
-    written = kb.upsert_chunks(doc_chunks)
+    written = kb.upsert_with_bm25_rebuild(doc_chunks)
     print(f"  ✅ 写入完成：{written} 个 chunk → knowledge_domain")
 
 
@@ -334,11 +337,11 @@ async def build_pipeline(
       Step 1   读取文档（PyPDFLoader / TextLoader）
       Step 2   智能分块（MarkdownHeaderTextSplitter / RecursiveCharacterTextSplitter）
       Step 2.5 Contextual RAG 上下文增强（LLM 并发，可跳过）
-      Step 3   BGE-M3 嵌入（dense + sparse 双向量）
+      Step 3   BGE-M3 Dense 嵌入 + 全库 BM25 稀疏权重重建
       Step 4   写入 Milvus（MilvusClient upsert）
     """
     print(f"\n{'='*55}")
-    print(f" EduAgent 知识库构建")
+    print(f" MentorHub 知识库构建")
     print(f" 文件      ：{file_path}")
     print(f" 课程      ：{course_id}")
     print(f" 文档 ID   ：{document_id}")

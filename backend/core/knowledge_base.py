@@ -1,213 +1,179 @@
 import hashlib
-import time
-from dataclasses import dataclass, field
-from typing import Optional
+import math
 import os
-backend_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-print(f'backend_path: {backend_path}')
-
-from backend.config import get_settings
-from backend.core.logger import get_logger
-
-
-logger = get_logger(__name__)
-
-
-# ──────────────────────────────────────────────────────────────
-# BGE-M3 本地嵌入模型（进程内单例，dense + sparse 双输出）
-# ──────────────────────────────────────────────────────────────
-
-class BGEMEmbedder:
-    """
-    BGE-M3 本地嵌入模型单例。
-
-    一次推理同时输出：
-      - dense 向量（1024 维浮点数组，用于语义相似度检索）
-      - sparse 向量（{token_id: weight} 字典，用于关键词精确检索）
-
-    进程内单例：首次调用 get_instance() 时加载模型（约5-15秒），
-    后续调用直接返回同一实例，不重复加载。
-
-    用法：
-        embedder = BGEMEmbedder.get_instance()
-        dense, sparse = embedder.encode_query("什么是 Spring IOC？")
-    """
-
-    _instance: Optional["BGEMEmbedder"] = None   # 单例持有
-
-    def __init__(self, model_path: str):
-        # ── 兼容性补丁1：FlagEmbedding 1.3.x 依赖 transformers 内部函数 ──
-        # transformers>=5.0 移除了 is_torch_fx_available，
-        # 但当前锁定 transformers==4.51.0 不受影响。
-        # 此补丁作为保险，避免未来升级时报 ImportError。
-        import importlib.util as _ilu
-        from transformers.utils import import_utils as _tf_iu
-        if not hasattr(_tf_iu, "is_torch_fx_available"):
-            _tf_iu.is_torch_fx_available = (
-                lambda: _ilu.find_spec("torch.fx") is not None
-            )
-
-        # ── 兼容性补丁2：修复 XLMRobertaModel 不接受 dtype 参数的问题 ──
-        # 某些 transformers 版本中 XLMRobertaModel.__init__() 不接受 dtype 关键字参数，
-        # 但 FlagEmbedding 内部会传入该参数，导致 TypeError。
-        # 通过子类覆盖，在调用父类前丢弃 dtype 参数。
-        from transformers.models.xlm_roberta import modeling_xlm_roberta as _xlm
-        _OriginalXLMRoberta = _xlm.XLMRobertaModel
-
-        class _PatchedXLMRobertaModel(_OriginalXLMRoberta):
-            def __init__(self, config, **kwargs):
-                kwargs.pop("dtype", None)  # 丢弃 FlagEmbedding 传入的 dtype
-                super().__init__(config, **kwargs)
-
-        _xlm.XLMRobertaModel = _PatchedXLMRobertaModel
-
-        import torch
-        from FlagEmbedding import BGEM3FlagModel
-
-        logger.info("bge_m3.loading", model_path=model_path)
-
-        # ── fp16 仅在 CUDA 上启用，MPS（Apple M系列）不启用 ──
-        # MPS 在 BGE-M3 attention 矩阵乘法上会触发 LLVM ERROR，
-        # CPU 模式下用 fp32，速度稍慢但稳定。
-        _use_fp16 = False
-
-        self._model = BGEM3FlagModel(
-            model_name_or_path=model_path,
-            use_fp16=_use_fp16,
-        )
-        logger.info("bge_m3.loaded", use_fp16=_use_fp16)
-
-    @classmethod
-    def get_instance(cls) -> "BGEMEmbedder":
-        """获取单例（首次调用时加载模型，后续复用）"""
-        if cls._instance is None:
-            bge_m3_model_path = os.path.join(backend_path, get_settings().bge_m3_model_path)
-            cls._instance = BGEMEmbedder(bge_m3_model_path)
-        return cls._instance
-    def encode(
-        self,
-        texts: list[str],
-        batch_size: int = 12,
-    ) -> tuple[list[list[float]], list[dict]]:
-        """
-        批量编码文本，同时返回 dense 和 sparse 两种向量。
-
-        Args:
-            texts:      待编码的文本列表
-            batch_size: 单次推理批大小，越大速度越快但显存占用越多；
-                        12 是 16GB 显存 / 统一内存下的经验值
-
-        Returns:
-            (dense_vecs, sparse_vecs)
-              dense_vecs:  list of 1024-dim float 向量，每项对应 texts[i]
-              sparse_vecs: list of {token_id: weight} 字典，每项对应 texts[i]
-        """
-        output = self._model.encode(
-            texts,
-            batch_size=batch_size,
-            max_length=8192,            # BGE-M3 支持最长 8192 token，覆盖大多数 chunk
-            return_dense=True,          # 输出稠密语义向量
-            return_sparse=True,         # 输出稀疏关键词向量
-            return_colbert_vecs=False,  # ColBERT 多向量表示，本项目不用
-        )
-        # print(f'output: {output}')
-        # print("=="*40)
-        dense_vecs = output["dense_vecs"].tolist()   # numpy → Python list
-        # print(f'dense_vecs: {dense_vecs}')
-        # print("==" * 40)
-        # sparse: numpy.float16 → Python float
-        # 必须转换！LangGraph MemorySaver 用 msgpack 序列化 State，
-        # msgpack 不支持 numpy.float16，会在运行时抛 TypeError。
-        sparse_vecs = [{int(k): float(v) for k, v in d.items()}
-                       for d in output["lexical_weights"]]
-        # print(f'sparse_vecs: {sparse_vecs}')
-        return dense_vecs, sparse_vecs
-
-    def encode_query(self, text: str) -> tuple[list[float], dict]:
-        """
-        编码单条查询，返回 (dense_vec, sparse_vec)。
-
-        查询时调用此方法（而非 encode），batch_size=1 避免不必要的 padding。
-
-        Returns:
-            (dense_vec, sparse_vec)
-              dense_vec:  1024-dim float 列表
-              sparse_vec: {token_id: weight} 字典
-        """
-        dense_list, sparse_list = self.encode([text], batch_size=1)
-        return dense_list[0], sparse_list[0]
-
-
-@dataclass
-class DocumentChunk:
-    """
-    准备写入 Milvus 的单个文档块，字段与 Milvus Schema 一一对应。
-
-    id:               全局唯一 ID（MD5 of content + document_id + chunk_index）
-    content:          chunk 文本（Contextual RAG 模式下含 LLM 生成的上下文描述前缀）
-    embedding:        Dense 向量（BGE-M3，1024 维）
-    sparse_embedding: Sparse 向量（{token_id: weight}，BGE-M3 lexical weights）
-    source_name:      来源标注（检索结果展示用，如 "Java讲义 > 第3章 > 3.1 IOC"）
-    """
-    id:               str
-    content:          str
-    embedding:        list[float]
-    sparse_embedding: dict
-    course_id:        str
-    document_id:      str
-    source_name:      str
-    chunk_type:       str                  # "text" / "code" / "table"
-    chunk_index:      int
-    version:          str
-    tenant_id:        str = "tenant_default"
-    updated_at:       int = field(default_factory=lambda: int(time.time()))
-
-def generate_chunk_id(content: str, document_id: str, chunk_index: int) -> str:
-    """
-    生成 chunk 全局唯一 ID（MD5 散列）。
-
-    用 document_id + chunk_index + content 前缀组合，确保：
-    - 同一文档不同位置的 chunk 不冲突
-    - 内容不变时 ID 稳定（幂等重建时不会重复插入）
-
-    注意：此函数后续会作为 KnowledgeBaseClient 的静态方法重新出现（5.6），
-    届时 build_knowledge_base.py 会改为调用 KnowledgeBaseClient.generate_chunk_id()。
-    """
-    raw = f"{document_id}_{chunk_index}_{content[:50]}"
-    # print(f'raw: {raw}')
-    return hashlib.md5(raw.encode()).hexdigest()
-
-
-import hashlib
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
-from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker
+from pymilvus import AnnSearchRequest, MilvusClient, WeightedRanker
 
 from backend.config import get_settings
-from backend.core.logger import get_logger,configure_logging
+from backend.core.logger import configure_logging, get_logger
+
+backend_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 configure_logging()
 logger = get_logger(__name__)
 
 COLLECTION_NAME = "knowledge_domain"
 
 
+class BGEMEmbedder:
+    """BGE-M3 本地 Dense Embedding 单例。BM25 词法检索不再依赖 BGE lexical weights。"""
+
+    _instance: Optional["BGEMEmbedder"] = None
+
+    def __init__(self, model_path: str):
+        import importlib.util as _ilu
+        from transformers.utils import import_utils as _tf_iu
+
+        if not hasattr(_tf_iu, "is_torch_fx_available"):
+            _tf_iu.is_torch_fx_available = lambda: _ilu.find_spec("torch.fx") is not None
+
+        from transformers.models.xlm_roberta import modeling_xlm_roberta as _xlm
+
+        _OriginalXLMRoberta = _xlm.XLMRobertaModel
+
+        class _PatchedXLMRobertaModel(_OriginalXLMRoberta):
+            def __init__(self, config, **kwargs):
+                kwargs.pop("dtype", None)
+                super().__init__(config, **kwargs)
+
+        _xlm.XLMRobertaModel = _PatchedXLMRobertaModel
+
+        from FlagEmbedding import BGEM3FlagModel
+
+        logger.info("bge_m3.loading", model_path=model_path)
+        self._model = BGEM3FlagModel(model_name_or_path=model_path, use_fp16=False)
+        logger.info("bge_m3.loaded", use_fp16=False)
+
+    @classmethod
+    def get_instance(cls) -> "BGEMEmbedder":
+        if cls._instance is None:
+            model_path = os.path.join(backend_path, get_settings().bge_m3_model_path)
+            cls._instance = cls(model_path)
+        return cls._instance
+
+    def encode(self, texts: list[str], batch_size: int = 12) -> list[list[float]]:
+        output = self._model.encode(
+            texts,
+            batch_size=batch_size,
+            max_length=8192,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )
+        return output["dense_vecs"].tolist()
+
+    def encode_query(self, text: str) -> list[float]:
+        return self.encode([text], batch_size=1)[0]
+
+
+class BM25SparseEncoder:
+    """
+    将 BM25 分数分解为 Milvus 可检索的 sparse vector。
+
+    文档侧保存：idf(term) * BM25 TF saturation
+    Query 侧保存：query term frequency
+    两者做 Inner Product 即得到 BM25 风格词法相关性分数。
+
+    中文使用 jieba 分词；token id 使用稳定哈希，因此查询时无需额外词表文件。
+    """
+
+    K1 = 1.5
+    B = 0.75
+    _VALID_TOKEN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_+#.\-]")
+
+    @classmethod
+    def tokenize(cls, text: str) -> list[str]:
+        import jieba
+
+        tokens = []
+        for raw in jieba.lcut((text or "").lower(), cut_all=False):
+            token = raw.strip()
+            if token and cls._VALID_TOKEN.search(token):
+                tokens.append(token)
+        return tokens
+
+    @staticmethod
+    def _token_id(token: str) -> int:
+        # Milvus sparse vector 使用整数维度；32-bit 稳定哈希足够当前课程知识库规模。
+        value = int.from_bytes(hashlib.md5(token.encode("utf-8")).digest()[:4], "big")
+        return value or 1
+
+    @classmethod
+    def encode_documents(cls, texts: list[str]) -> list[dict[int, float]]:
+        tokenized = [cls.tokenize(text) for text in texts]
+        n_docs = len(tokenized)
+        if n_docs == 0:
+            return []
+
+        lengths = [len(tokens) for tokens in tokenized]
+        avgdl = sum(lengths) / n_docs if n_docs else 1.0
+        avgdl = max(avgdl, 1.0)
+
+        df = Counter()
+        for tokens in tokenized:
+            df.update(set(tokens))
+
+        idf = {
+            token: math.log(1.0 + (n_docs - freq + 0.5) / (freq + 0.5))
+            for token, freq in df.items()
+        }
+
+        vectors: list[dict[int, float]] = []
+        for tokens, dl in zip(tokenized, lengths):
+            tf = Counter(tokens)
+            vector: dict[int, float] = {}
+            norm = cls.K1 * (1.0 - cls.B + cls.B * dl / avgdl)
+            for token, freq in tf.items():
+                tf_weight = (freq * (cls.K1 + 1.0)) / (freq + norm)
+                vector[cls._token_id(token)] = float(idf[token] * tf_weight)
+
+            # Milvus 2.4 sparse field 不接受完全空的向量。
+            if not vector:
+                vector[cls._token_id("__empty__")] = 1e-9
+            vectors.append(vector)
+        return vectors
+
+    @classmethod
+    def encode_query(cls, text: str) -> dict[int, float]:
+        tf = Counter(cls.tokenize(text))
+        vector = {cls._token_id(token): float(freq) for token, freq in tf.items()}
+        if not vector:
+            vector[cls._token_id("__empty__")] = 1e-9
+        return vector
+
+
+@dataclass
+class DocumentChunk:
+    id: str
+    content: str
+    embedding: list[float]
+    sparse_embedding: dict[int, float]
+    course_id: str
+    document_id: str
+    source_name: str
+    chunk_type: str
+    chunk_index: int
+    version: str
+    tenant_id: str = "tenant_default"
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+
+
+def generate_chunk_id(content: str, document_id: str, chunk_index: int) -> str:
+    raw = f"{document_id}_{chunk_index}_{content[:50]}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
 class KnowledgeBaseClient:
-    """
-    Milvus 知识库客户端（MilvusClient 版）。
+    """Milvus 2.4 知识库客户端：BGE-M3 Dense + BM25 Sparse Hybrid Retrieval。"""
 
-    单 Collection 设计（knowledge_domain），按 tenant_id 字段过滤实现多租户隔离。
-    本节实现写入方法，5.6 节追加检索方法。
-
-    单例连接：_client 是类变量，整个进程只创建一次 MilvusClient 连接。
-    """
-
-    _client: Optional["MilvusClient"] = None
+    _client: Optional[MilvusClient] = None
     _loaded: bool = False
-
-    # HNSW 搜索时的候选集大小，精度/速度平衡点（5.6 节 _hybrid_search 使用）
     ANN_EF = 64
+    VECTOR_TOP_K = 10
 
     def __init__(self):
         if KnowledgeBaseClient._client is None:
@@ -220,50 +186,92 @@ class KnowledgeBaseClient:
             try:
                 KnowledgeBaseClient._client.load_collection(COLLECTION_NAME)
             except Exception:
-                pass   # init_milvus.py 尚未运行时忽略
+                pass
             KnowledgeBaseClient._loaded = True
 
-    # ── 写入：批量 Upsert ────────────────────────────────────
-
-    def upsert_chunks(self, chunks: list) -> int:
-        """
-        批量写入文档块（Upsert：primary key 存在则更新，不存在则插入）。
-
-        MilvusClient 行格式写入：每行一个 dict，key = 字段名，字段顺序无关。
-        """
+    def upsert_chunks(self, chunks: list[DocumentChunk]) -> int:
         if not chunks:
             return 0
-        # print(f'len(chunks):{len(chunks)}')
-        # print(f'chunks[0]:{chunks[0]}')
         data = [
             {
-                "id":               c.id,
-                "embedding":        c.embedding,
+                "id": c.id,
+                "embedding": c.embedding,
                 "sparse_embedding": c.sparse_embedding,
-                "content":          c.content[:4096],
-                "chunk_index":      c.chunk_index,
-                "document_id":      c.document_id,
-                "course_id":        c.course_id,
-                "tenant_id":        c.tenant_id,
-                "source_name":      c.source_name,
-                "chunk_type":       c.chunk_type,
-                "version":          c.version,
-                "updated_at":       c.updated_at,
+                "content": c.content[:4096],
+                "chunk_index": c.chunk_index,
+                "document_id": c.document_id,
+                "course_id": c.course_id,
+                "tenant_id": c.tenant_id,
+                "source_name": c.source_name,
+                "chunk_type": c.chunk_type,
+                "version": c.version,
+                "updated_at": c.updated_at,
             }
             for c in chunks
         ]
-
         self._client.upsert(collection_name=COLLECTION_NAME, data=data)
         logger.info("knowledge_base.chunks_upserted", count=len(chunks))
         return len(chunks)
 
-        # ── 写入：删除指定文档的所有 chunk ──────────────────────
+    def list_chunks(self, exclude_document_id: Optional[str] = None) -> list[DocumentChunk]:
+        """读取当前语料，用于新增文档时重新计算全库 BM25 IDF。"""
+        filter_expr = ""
+        if exclude_document_id:
+            safe_id = exclude_document_id.replace('"', '\\"')
+            filter_expr = f'document_id != "{safe_id}"'
+
+        rows = self._client.query(
+            collection_name=COLLECTION_NAME,
+            filter=filter_expr,
+            output_fields=[
+                "id", "embedding", "sparse_embedding", "content", "chunk_index",
+                "document_id", "course_id", "tenant_id", "source_name",
+                "chunk_type", "version", "updated_at",
+            ],
+            limit=16384,
+        )
+        return [
+            DocumentChunk(
+                id=row["id"],
+                content=row.get("content", ""),
+                embedding=row.get("embedding", []),
+                sparse_embedding=row.get("sparse_embedding", {}) or {},
+                course_id=row.get("course_id", ""),
+                document_id=row.get("document_id", ""),
+                source_name=row.get("source_name", ""),
+                chunk_type=row.get("chunk_type", "text"),
+                chunk_index=row.get("chunk_index", 0),
+                version=row.get("version", "1.0"),
+                tenant_id=row.get("tenant_id", "tenant_default"),
+                updated_at=row.get("updated_at", int(time.time())),
+            )
+            for row in rows
+        ]
+
+    def upsert_with_bm25_rebuild(self, new_chunks: list[DocumentChunk]) -> int:
+        """
+        新增/更新文档时，基于“已有语料 + 新文档”重新计算 BM25 IDF，
+        然后统一 upsert，保证不同批次导入的 BM25 权重处于同一统计空间。
+        """
+        if not new_chunks:
+            return 0
+
+        document_id = new_chunks[0].document_id
+        existing = self.list_chunks(exclude_document_id=document_id)
+        corpus = existing + new_chunks
+        sparse_vectors = BM25SparseEncoder.encode_documents([c.content for c in corpus])
+        for chunk, sparse in zip(corpus, sparse_vectors):
+            chunk.sparse_embedding = sparse
+
+        self.upsert_chunks(corpus)
+        logger.info(
+            "knowledge_base.bm25_rebuilt",
+            corpus_chunks=len(corpus),
+            new_chunks=len(new_chunks),
+        )
+        return len(new_chunks)
 
     def delete_document_chunks(self, document_id: str) -> None:
-        """
-        删除指定文档的所有 chunk（文档更新时先删后插，幂等重建）。
-        对 document_id 转义，防止 filter 表达式注入。
-        """
         safe_id = document_id.replace('"', '\\"')
         self._client.delete(
             collection_name=COLLECTION_NAME,
@@ -273,111 +281,74 @@ class KnowledgeBaseClient:
 
     @staticmethod
     def generate_chunk_id(content: str, document_id: str, chunk_index: int) -> str:
-        """生成 chunk 唯一 ID（MD5）。内容+位置不变则 ID 不变，支持幂等 upsert。"""
-        raw = f"{document_id}_{chunk_index}_{content[:50]}"
-        return hashlib.md5(raw.encode()).hexdigest()
-
-        # ── 检索配置 ─────────────────────────────────────────────
-
-    VECTOR_TOP_K = 10  # Hybrid 召回的候选数量，传给 Reranker 精排
+        return generate_chunk_id(content, document_id, chunk_index)
 
     def _hybrid_search(
-            self,
-            query_embedding: list[float],
-            query_sparse: dict,
-            top_k: int,
-            filters: Optional[str] = None,
+        self,
+        query_text: str,
+        query_embedding: list[float],
+        top_k: int,
+        filters: Optional[str] = None,
     ) -> list[dict]:
-        """
-        对 knowledge_domain 做 Hybrid 检索（Dense + Sparse → WeightedRanker 融合）。
-
-        两个 AnnSearchRequest 分别构造 Dense 和 Sparse 检索请求，
-        由 Milvus 在服务端并行执行后，用 WeightedRanker 加权融合排序。
-
-        Args:
-            query_embedding: Dense Query 向量（1024 维，来自 encode_query）
-            query_sparse:    Sparse Query 向量（{token_id: weight}，来自 encode_query）
-            top_k:           每路召回数量（融合后同样取 top_k）
-            filters:         Milvus bool 表达式，如 'tenant_id == "xxx"'
-
-        Returns:
-            候选文档列表，每项含 "content" / "score" / "metadata"。
-            score 是 WeightedRanker 的加权排序信号，不是概率，
-            直接交给 5.7 节的 Reranker 做精细打分。
-        """
+        """BGE-M3 Dense + BM25 Sparse 两路召回，再以 0.7 / 0.3 权重融合。"""
         try:
-            # ── Dense ANN 检索请求 ─────────────────────────────────────
-            # COSINE 度量匹配 BGE-M3 dense 向量（L2 归一化后等价于余弦相似度）
-            # ef=64：HNSW 搜索时的候选集大小，越大精度越高，64 是精度/速度平衡点
             dense_req = AnnSearchRequest(
                 data=[query_embedding],
                 anns_field="embedding",
-                param={
-                    "metric_type": "COSINE",
-                    "params": {"ef": self.ANN_EF},
-                },
+                param={"metric_type": "COSINE", "params": {"ef": self.ANN_EF}},
                 limit=top_k,
                 expr=filters,
             )
 
-            # ── Sparse 关键词检索请求 ──────────────────────────────────
-            # IP（内积）是 BGE-M3 lexical_weights 的标准度量
-            sparse_req = AnnSearchRequest(
-                data=[query_sparse],
+            bm25_req = AnnSearchRequest(
+                data=[BM25SparseEncoder.encode_query(query_text)],
                 anns_field="sparse_embedding",
                 param={"metric_type": "IP"},
                 limit=top_k,
                 expr=filters,
             )
 
-            output_fields = [
-                "content", "source_name", "chunk_type",
-                "course_id", "document_id", "chunk_index",
-            ]
-
-            # ── WeightedRanker(0.7, 0.3) ──────────────────────────────
-            # 第一个权重对应第一个请求（Dense），第二个对应第二个请求（Sparse）
-            # 两路结果在 Milvus 服务端并行检索，融合后返回
             results = self._client.hybrid_search(
                 collection_name=COLLECTION_NAME,
-                reqs=[dense_req, sparse_req],
+                reqs=[dense_req, bm25_req],
                 ranker=WeightedRanker(0.7, 0.3),
                 limit=top_k,
-                output_fields=output_fields,
+                output_fields=[
+                    "content", "source_name", "chunk_type",
+                    "course_id", "document_id", "chunk_index",
+                ],
             )
-            # print(f'results: {results}')
-            # print(f'results: {type(results)}')
-            # print(f'results: {results[0]}')
-            # print(f'results: {len(results[0])}')
+
             candidates = []
             for hit in results[0]:
-                # print(f'hit-->{hit}')
-                candidates.append({
-                    "content": hit["entity"].get("content") or "",
-                    "score":   hit.get("distance") or 0.0,
-                    "metadata": {
-                        "source_name": hit["entity"].get("source_name") or "",
-                        "chunk_type":  hit["entity"].get("chunk_type")  or "text",
-                        "course_id":   hit["entity"].get("course_id")   or "",
-                        "document_id": hit["entity"].get("document_id") or "",
-                        "chunk_index": hit["entity"].get("chunk_index") or 0,
-                    },
-                })
+                entity = hit.get("entity", {})
+                candidates.append(
+                    {
+                        "content": entity.get("content") or "",
+                        "score": hit.get("distance") or 0.0,
+                        "metadata": {
+                            "source_name": entity.get("source_name") or "",
+                            "chunk_type": entity.get("chunk_type") or "text",
+                            "course_id": entity.get("course_id") or "",
+                            "document_id": entity.get("document_id") or "",
+                            "chunk_index": entity.get("chunk_index") or 0,
+                        },
+                    }
+                )
+
             logger.info(
                 "knowledge_base.hybrid_search_done",
                 candidates=len(candidates),
+                dense_weight=0.7,
+                bm25_weight=0.3,
             )
             return candidates
-        except Exception as e:
-            logger.error("knowledge_base.hybrid_search_failed", error=str(e))
+        except Exception as exc:
+            logger.error("knowledge_base.hybrid_search_failed", error=str(exc))
             return []
 
     @staticmethod
     def _build_filter(tenant_id: str, course_id: Optional[str] = None) -> str:
-        """
-        构建 Milvus bool 过滤表达式。
-        对 tenant_id / course_id 做转义，防止 filter 表达式注入。
-        """
         safe_tenant = tenant_id.replace('"', '\\"')
         expr = f'tenant_id == "{safe_tenant}"'
         if course_id:
@@ -386,60 +357,13 @@ class KnowledgeBaseClient:
         return expr
 
 
-if __name__ == '__main__':
-    bge_model = BGEMEmbedder(
-        model_path=r"F:\mygit\EduAgent\backend\models\embedding\bge-m3"
-    )
-
+if __name__ == "__main__":
+    query = "商品聚合多模态大模型项目主要讲的是什么内容"
+    embedder = BGEMEmbedder.get_instance()
     kb = KnowledgeBaseClient()
-
-    # =========================
-    # 先导入文档
-    # =========================
-    from scripts.build_knowledge_base import (
-        load_document,
-        split_documents,
-        embed_chunks,
-    )
-
-    file_path = r"F:\mygit\EduAgent\samples\sample2.md"
-
-    docs = load_document(file_path)
-
-    chunks = split_documents(
-        docs,
-        file_path,
-    )
-
-    embed_docs = embed_chunks(
-        chunks,
-        course_id="01",
-        document_id="02",
-    )
-
-    written = kb.upsert_chunks(embed_docs)
-
-    print(f"写入数量: {written}")
-
-    # =========================
-    # 再执行 Hybrid Search
-    # =========================
-    model = BGEMEmbedder.get_instance()
-
-    dense, sparse = model.encode_query(
-        text="商品聚合多模态大模型项目主要讲的是什么内容"
-    )
-
     results = kb._hybrid_search(
-        dense,
-        sparse,
+        query_text=query,
+        query_embedding=embedder.encode_query(query),
         top_k=5,
     )
-
-    print(f"results: {results}")
-
-    if results:
-        print(f"results[0]: {results[0]}")
-    else:
-        print("没有检索到结果")
-
+    print(results[:1])

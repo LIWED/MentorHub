@@ -38,11 +38,11 @@ QA Agent 首先将问题区分为：
 当前代码中的混合检索方案为：
 
 ```text
-BGE-M3 Query Encoding
+Query
         │
-        ├── Dense Vector ──┐
-        │                  ├── Milvus Hybrid Search
-        └── Sparse Vector ─┘        │
+        ├── BGE-M3 Dense Vector ──┐
+        │                         ├── Milvus Hybrid Search
+        └── BM25 Sparse ──────────┘
                             WeightedRanker(0.7, 0.3)
                                     │
                               Recall Top-K
@@ -56,9 +56,9 @@ BGE-M3 Query Encoding
 
 - Embedding：**BGE-M3**
 - Dense：负责语义相似度召回。
-- Sparse：使用 BGE-M3 lexical weights，增强关键词和专有名词匹配。
+- BM25：应用侧使用 Jieba 分词并计算 BM25 权重，写入 Milvus Sparse Vector 完成关键词召回。
 - Vector DB：**Milvus**
-- Fusion：`WeightedRanker(0.7, 0.3)`，Dense / Sparse 权重分别为 0.7 / 0.3。
+- Fusion：`WeightedRanker(0.7, 0.3)`，Dense / BM25 权重分别为 0.7 / 0.3。
 - Reranker：**BGE-Reranker-v2-m3** Cross Encoder。
 - Hybrid Recall：默认 Top 10。
 - Rerank：默认保留 Top 3。
@@ -191,7 +191,7 @@ Generate Final Report
 | Agent Framework | LangChain 1.2.10 / LangGraph 1.0.9 |
 | Structured Data | Pydantic 2 |
 | Relational DB | PostgreSQL 15 / SQLAlchemy Async |
-| Vector DB | Milvus 2.4 |
+| Vector DB | Milvus 2.4.0 |
 | Embedding | BGE-M3 |
 | Reranker | BGE-Reranker-v2-m3 |
 | Model Runtime | Transformers / Sentence Transformers / FlagEmbedding / PyTorch |
@@ -357,7 +357,7 @@ USE_CONTEXT = True
 python scripts/build_knowledge_base.py
 ```
 
-当前脚本支持 `.pdf`、`.md`、`.markdown`。`USE_CONTEXT=True` 时会先进行 Contextual RAG 上下文增强，再生成 BGE-M3 Dense / Sparse 向量并写入 Milvus。
+当前脚本支持 `.pdf`、`.md`、`.markdown`。`USE_CONTEXT=True` 时会先进行 Contextual RAG 上下文增强，再生成 BGE-M3 Dense 向量；BM25 稀疏权重会基于当前语料重新计算后写入 Milvus。
 
 ### 7. 启动后端
 

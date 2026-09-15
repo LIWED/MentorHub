@@ -157,14 +157,14 @@ def retrieve(
 
     # ── 第一步：向量化（在 Pipeline 内部完成，调用方无需感知）──────
     embedder = BGEMEmbedder.get_instance()
-    dense_vec, sparse_vec = embedder.encode_query(query)
+    dense_vec = embedder.encode_query(query)
 
     # ── 第二步：Hybrid 召回 ─────────────────────────────────────────
     kb = KnowledgeBaseClient()
     filters = kb._build_filter(tenant_id, course_id)
     candidates = kb._hybrid_search(
+        query_text=query,
         query_embedding=dense_vec,
-        query_sparse=sparse_vec,
         top_k=recall_top_k,
         filters=filters,
     )
