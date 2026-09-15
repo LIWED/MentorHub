@@ -1,0 +1,81 @@
+# ============================================================
+# EduAgent .gitignore
+# 原则：密钥、个人隐私数据、超大模型权重、本地工具产物一律不入库
+# ============================================================
+
+# ===== 1. 环境变量与密钥（隐私，绝不提交）=====
+.env.local
+.env.*.local
+*.env.local
+!.env.example
+!**/.env.example
+
+# ===== 2. 本地模型权重（体积数 GB，启动时自动下载）=====
+models/
+backend/models/
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.ckpt
+*.h5
+
+# ===== 3. 个人隐私数据（真实简历文本 / 学员答卷样例）=====
+backend/agents/resume/resume.json
+backend/agents/exam/student_answer.docx
+
+# ===== 3.1 本地 Python 复习 demo（含硬编码密钥与本地绝对路径，整目录不入库）=====
+review/
+
+# ===== 4. IDE / 编辑器 =====
+.idea/
+.vscode/
+*.iml
+
+# ===== 5. 操作系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 6. Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 7. Node / 前端 =====
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== 8. 本地数据库与数据文件 =====
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== 9. 本地工具产物 =====
+.codegraph/
+.superpowers/
+.reasonix/
+*.visual-check.*
+docker-compose-backup.yml
+
+# ===== 10. 日志与构建输出 =====
+*.log
+logs/
+site/

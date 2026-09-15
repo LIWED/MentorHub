@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "EduAgent QA 模块详细框架图",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1390, 740],
+    "views": [
+      {
+        "id": "request_runtime",
+        "label": "请求与运行时",
+        "focus": ["frontend", "qa_api", "qa_graph", "classifier", "preprocess", "retrieval"],
+        "note": "从前端请求进入 QA StateGraph，并按问题类型分流。"
+      },
+      {
+        "id": "rag_path",
+        "label": "RAG 检索链路",
+        "focus": ["qa_graph", "retrieval", "embedder", "milvus", "reranker", "llm"],
+        "note": "BGE-M3 混合召回后由 BGE-Reranker 决定高低置信度分支。"
+      },
+      {
+        "id": "fallback_memory",
+        "label": "兜底与记忆",
+        "focus": ["qa_graph", "web_mcp", "llm", "memory_store"],
+        "note": "低置信度可联网补充，问答摘要和检查点支持多轮会话。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "frontend",
+      "type": "frontend",
+      "label": "QA 前端页面",
+      "sublabel": "SSE 问答",
+      "pos": [30, 310],
+      "size": [165, 72]
+    },
+    {
+      "id": "qa_api",
+      "type": "backend",
+      "label": "QA API",
+      "sublabel": "REST · SSE · History",
+      "tag": "JWT 依赖注入",
+      "pos": [250, 310],
+      "size": [175, 72]
+    },
+    {
+      "id": "qa_graph",
+      "type": "backend",
+      "label": "QA StateGraph",
+      "sublabel": "LangGraph · State · Memory",
+      "pos": [485, 310],
+      "size": [205, 72]
+    },
+    {
+      "id": "classifier",
+      "type": "backend",
+      "label": "问题分类器",
+      "sublabel": "规则 · MiniLM · 策略",
+      "pos": [765, 65],
+      "size": [180, 68]
+    },
+    {
+      "id": "preprocess",
+      "type": "backend",
+      "label": "查询预处理",
+      "sublabel": "HyDE · Multi Query",
+      "pos": [765, 190],
+      "size": [180, 68]
+    },
+    {
+      "id": "retrieval",
+      "type": "backend",
+      "label": "检索编排",
+      "sublabel": "隔离过滤 · Top-K",
+      "pos": [765, 315],
+      "size": [180, 68]
+    },
+    {
+      "id": "web_mcp",
+      "type": "external",
+      "label": "Web Search MCP",
+      "sublabel": "低置信度联网补充",
+      "pos": [765, 500],
+      "size": [180, 68]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM 服务",
+      "sublabel": "Factory · 流式生成",
+      "pos": [765, 625],
+      "size": [180, 68]
+    },
+    {
+      "id": "memory_store",
+      "type": "database",
+      "label": "会话记忆与摘要",
+      "sublabel": "MemorySaver · qa_sessions",
+      "pos": [485, 80],
+      "size": [190, 68]
+    },
+    {
+      "id": "embedder",
+      "type": "backend",
+      "label": "BGE-M3 Embedding",
+      "sublabel": "Dense + Sparse 向量",
+      "pos": [970, 230],
+      "size": [190, 68]
+    },
+    {
+      "id": "milvus",
+      "type": "database",
+      "label": "Milvus 知识库",
+      "sublabel": "Hybrid Search · 隔离过滤",
+      "pos": [1194, 230],
+      "size": [170, 68]
+    },
+    {
+      "id": "reranker",
+      "type": "backend",
+      "label": "BGE-Reranker",
+      "sublabel": "CrossEncoder · Top-3 · 0.75",
+      "pos": [925, 395],
+      "size": [190, 68]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "QA 模块运行时",
+      "wraps": ["qa_api", "qa_graph", "classifier", "preprocess", "retrieval"],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "本地 RAG 能力",
+      "wraps": ["embedder", "milvus", "reranker"],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {"id": "frontend_api", "from": "frontend", "to": "qa_api", "label": "REST / SSE + JWT", "variant": "emphasis", "labelAt": [223, 396]},
+    {"id": "api_graph", "from": "qa_api", "to": "qa_graph", "label": "ainvoke / astream_events", "variant": "emphasis", "labelAt": [455, 396]},
+    {"id": "graph_classifier", "from": "qa_graph", "to": "classifier"},
+    {"id": "graph_preprocess", "from": "qa_graph", "to": "preprocess"},
+    {"id": "graph_retrieval", "from": "qa_graph", "to": "retrieval"},
+    {"id": "preprocess_retrieval", "from": "preprocess", "to": "retrieval"},
+    {"id": "retrieval_embedder", "from": "retrieval", "to": "embedder"},
+    {"id": "embedder_milvus", "from": "embedder", "to": "milvus"},
+    {"id": "milvus_reranker", "from": "milvus", "to": "reranker", "fromSide": "bottom", "toSide": "top"},
+    {"id": "reranker_graph", "from": "reranker", "to": "qa_graph", "variant": "emphasis"},
+    {"id": "graph_web", "from": "qa_graph", "to": "web_mcp", "variant": "dashed"},
+    {"id": "web_graph", "from": "web_mcp", "to": "qa_graph", "variant": "dashed"},
+    {"id": "graph_llm", "from": "qa_graph", "to": "llm", "variant": "emphasis"},
+    {"id": "llm_graph", "from": "llm", "to": "qa_graph", "variant": "emphasis"},
+    {"id": "graph_memory", "from": "qa_graph", "to": "memory_store", "fromSide": "top", "toSide": "bottom"}
+  ]
+}
