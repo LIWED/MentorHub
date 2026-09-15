@@ -1,4 +1,4 @@
-# EduAgent — 教育场景的 AI 多智能体辅助平台
+# MentorHub — 教育场景的 AI 多智能体辅助平台
 
 > 面向 IT 教育培训机构的 AI 原生教学辅助系统。  
 > 基于 **LangChain 1.2.10 + LangGraph 1.0.9 + FastAPI** 构建，核心大模型为 **DeepSeek-V3 / DeepSeek-Coder-V2**。
@@ -16,7 +16,7 @@ IT 教培机构每天面对四类重复性高、耗费师资的业务：
 | 简历审查 | 老师无暇逐份精读打分 |
 | 技术面试 | 缺少随时可陪练并给出专业反馈的「面试官」 |
 
-EduAgent 将这四类业务分别封装为独立的 AI Agent，每个 Agent 融合了企业私有知识、内置了完整业务流程、并配备了工程化容错机制。
+MentorHub 将这四类业务分别封装为独立的 AI Agent，每个 Agent 融合了企业私有知识、内置了完整业务流程、并配备了工程化容错机制。
 
 ---
 
@@ -102,8 +102,8 @@ EduAgent 将这四类业务分别封装为独立的 AI Agent，每个 Agent 融�
 ### 1. 克隆项目 & 创建环境
 
 ```bash
-git clone https://github.com/LIWED/EduAgent.git
-cd EduAgent
+git clone https://github.com/LIWED/MentorHub.git
+cd MentorHub
 
 conda create -n edu_agent python=3.11 -y
 conda activate edu_agent
@@ -148,7 +148,7 @@ python scripts/verify_env.py
 ### 6. 启动后端
 
 ```bash
-# 在项目根目录（EduAgent/）下执行
+# 在项目根目录（MentorHub/）下执行
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -199,7 +199,7 @@ npm run dev
 ## 目录结构
 
 ```
-EduAgent/
+MentorHub/
 ├── backend/
 │   ├── main.py                  # FastAPI 入口 & lifespan（模型预热 + DB 迁移）
 │   ├── config.py                # pydantic-settings 配置（从 .env.local 读取）
@@ -296,7 +296,7 @@ QA 和面试的 SSE 接口直连 `http://localhost:8000`，不经过 Vite proxy�
 
 ## 配套课件
 
-完整学习课件位于 `EduAgent课件/` 目录，共 10 章：
+完整学习课件位于 `MentorHub课件/` 目录，共 10 章：
 
 | 章节 | 内容 |
 |------|------|
