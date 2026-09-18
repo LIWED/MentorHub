@@ -2,6 +2,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ class BGEMEmbedder:
     """BGE-M3 本地 Dense Embedding 单例。BM25 词法检索不再依赖 BGE lexical weights。"""
 
     _instance: Optional["BGEMEmbedder"] = None
+    _instance_lock = threading.Lock()
 
     def __init__(self, model_path: str):
         import importlib.util as _ilu
@@ -46,24 +48,29 @@ class BGEMEmbedder:
 
         logger.info("bge_m3.loading", model_path=model_path)
         self._model = BGEM3FlagModel(model_name_or_path=model_path, use_fp16=False)
+        self._encode_lock = threading.Lock()
         logger.info("bge_m3.loaded", use_fp16=False)
 
     @classmethod
     def get_instance(cls) -> "BGEMEmbedder":
         if cls._instance is None:
-            model_path = os.path.join(backend_path, get_settings().bge_m3_model_path)
-            cls._instance = cls(model_path)
+            with cls._instance_lock:
+                if cls._instance is None:
+                    model_path = os.path.join(backend_path, get_settings().bge_m3_model_path)
+                    cls._instance = cls(model_path)
         return cls._instance
 
     def encode(self, texts: list[str], batch_size: int = 12) -> list[list[float]]:
-        output = self._model.encode(
-            texts,
-            batch_size=batch_size,
-            max_length=8192,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )
+        # BGEM3FlagModel 被多个检索线程共享，串行化 encode 保证线程安全。
+        with self._encode_lock:
+            output = self._model.encode(
+                texts,
+                batch_size=batch_size,
+                max_length=8192,
+                return_dense=True,
+                return_sparse=False,
+                return_colbert_vecs=False,
+            )
         return output["dense_vecs"].tolist()
 
     def encode_query(self, text: str) -> list[float]:

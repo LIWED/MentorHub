@@ -1,5 +1,7 @@
 # backend/agents/qa/graph.py
 
+import time
+
 from langgraph.graph import StateGraph, START, END
 
 from backend.agents.qa.state import QAState
@@ -8,6 +10,8 @@ from backend.agents.qa.nodes import (
     rewrite_query_node,
     hyde_generate_node,
     multi_query_rewrite_node,
+    iterative_plan_node,
+    iterative_retrieve_node,
     retrieve_node,
     generate_rag_node,
     web_search_node,
@@ -18,6 +22,42 @@ from backend.agents.qa.nodes import (
     _rule_classify_general,
 )
 from backend.core.memory import get_memory_saver
+from backend.core.logger import get_logger
+
+
+logger = get_logger(__name__)
+
+
+def _timed_node(node_name: str, node_func):
+    """统一统计 LangGraph 节点耗时，避免在每个节点里重复埋点。"""
+    async def wrapped(state: QAState) -> dict:
+        started = time.perf_counter()
+        try:
+            result = await node_func(state)
+        except Exception:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.error(
+                "qa.node_timing",
+                node=node_name,
+                elapsed_ms=round(elapsed_ms, 2),
+                status="error",
+                session_id=state.get("session_id"),
+                query_type=state.get("query_type"),
+            )
+            raise
+
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "qa.node_timing",
+            node=node_name,
+            elapsed_ms=round(elapsed_ms, 2),
+            status="ok",
+            session_id=state.get("session_id"),
+            query_type=(result or {}).get("query_type", state.get("query_type")),
+        )
+        return result
+
+    return wrapped
 
 
 def _route_by_query_type(state: QAState) -> str:
@@ -26,7 +66,7 @@ def _route_by_query_type(state: QAState) -> str:
 
     GENERAL + enable_web_search=True  → "GENERAL_WEB"：先联网再回答
     GENERAL + enable_web_search=False → "GENERAL"：直接 LLM
-    PRECISE / VAGUE / BROAD           → 直接进对应检索分支
+    PRECISE / VAGUE / BROAD / ITERATIVE → 直接进对应检索分支
     """
     qt = state.get("query_type", "PRECISE").upper()
     if qt == "GENERAL":
@@ -73,17 +113,19 @@ def build_qa_graph():
     builder = StateGraph(QAState)
 
     # ── 注册节点 ──────────────────────────────────────────────
-    builder.add_node("classify_query",       classify_query_node)
-    builder.add_node("rewrite_query",        rewrite_query_node)
-    builder.add_node("hyde_generate",        hyde_generate_node)
-    builder.add_node("multi_query_rewrite",  multi_query_rewrite_node)
-    builder.add_node("retrieve",             retrieve_node)
-    builder.add_node("generate_rag",         generate_rag_node)
-    builder.add_node("web_search",           web_search_node)
-    builder.add_node("generate_direct",      generate_direct_node)
-    builder.add_node("generate_general",     generate_general_node)
-    builder.add_node("enqueue_pending",      enqueue_pending_node)
-    builder.add_node("save_memory",          save_memory_node)
+    builder.add_node("classify_query",       _timed_node("classify_query", classify_query_node))
+    builder.add_node("rewrite_query",        _timed_node("rewrite_query", rewrite_query_node))
+    builder.add_node("hyde_generate",        _timed_node("hyde_generate", hyde_generate_node))
+    builder.add_node("multi_query_rewrite",  _timed_node("multi_query_rewrite", multi_query_rewrite_node))
+    builder.add_node("iterative_plan",        _timed_node("iterative_plan", iterative_plan_node))
+    builder.add_node("iterative_retrieve",    _timed_node("iterative_retrieve", iterative_retrieve_node))
+    builder.add_node("retrieve",             _timed_node("retrieve", retrieve_node))
+    builder.add_node("generate_rag",         _timed_node("generate_rag", generate_rag_node))
+    builder.add_node("web_search",            _timed_node("web_search", web_search_node))
+    builder.add_node("generate_direct",       _timed_node("generate_direct", generate_direct_node))
+    builder.add_node("generate_general",      _timed_node("generate_general", generate_general_node))
+    builder.add_node("enqueue_pending",       _timed_node("enqueue_pending", enqueue_pending_node))
+    builder.add_node("save_memory",           _timed_node("save_memory", save_memory_node))
 
     # ── 入口固定边 ────────────────────────────────────────────
     builder.add_edge(START, "classify_query")
@@ -98,6 +140,7 @@ def build_qa_graph():
             "PRECISE":     "rewrite_query",
             "VAGUE":       "rewrite_query",
             "BROAD":       "rewrite_query",
+            "ITERATIVE":   "rewrite_query",
         },
     )
 
@@ -109,16 +152,28 @@ def build_qa_graph():
             "PRECISE": "retrieve",
             "VAGUE":   "hyde_generate",
             "BROAD":   "multi_query_rewrite",
+            "ITERATIVE": "iterative_plan",
         },
     )
 
     # VAGUE / BROAD 额外预处理完成后汇入 retrieve
     builder.add_edge("hyde_generate",       "retrieve")
     builder.add_edge("multi_query_rewrite", "retrieve")
+    builder.add_edge("iterative_plan",       "iterative_retrieve")
 
     # ── 条件边②：置信度路由 ──────────────────────────────────
     builder.add_conditional_edges(
         "retrieve",
+        _route_by_confidence,
+        {
+            "high":       "generate_rag",
+            "low_web":    "web_search",
+            "low_direct": "generate_direct",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "iterative_retrieve",
         _route_by_confidence,
         {
             "high":       "generate_rag",

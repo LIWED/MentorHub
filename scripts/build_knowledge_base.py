@@ -1,7 +1,6 @@
 # scripts/build_knowledge_base.py（阶段版：文档加载 + 分块，5.4 / 5.5 继续补全）
 
 from pathlib import Path
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
@@ -29,28 +28,31 @@ _CHAR_SPLITTER = RecursiveCharacterTextSplitter(
 
 # ── 文档加载（5.2 内容，此处合并为完整文件）────────────────────
 
-def load_document(file_path: str) -> list[Document]:
-    """统一文档加载入口，根据扩展名选择 Loader"""
+def parse_document(file_path: str, document_id: str | None = None):
+    """统一解析入口：Markdown/TXT 原生解析，富文档优先 MinerU。"""
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在：{file_path}")
-    ext = path.suffix.lower()
-    if ext == ".pdf":
-        loader = PyPDFLoader(file_path)
-        pages = loader.load()
-        print(f"  [PDF] 加载完成：{len(pages)} 页 ← {path.name}")
-        return pages
-    elif ext in (".md", ".markdown"):
-        loader = TextLoader(file_path, encoding="utf-8")
-        docs = loader.load()
-        print(f"  [MD]  加载完成：{len(docs[0].page_content)} 字符 ← {path.name}")
-        return docs
-    else:
-        raise ValueError(
-            f"不支持的文件类型：{ext}\n"
-            f"当前支持：.pdf / .md / .markdown\n"
-            f"提示：可用 markitdown 将 Word/PPT 转换为 .md 后再导入"
-        )
+
+    from backend.core.parsers import get_parser_registry
+
+    parsed = get_parser_registry().parse(
+        file_path,
+        document_id=document_id,
+    )
+    total_chars = sum(len(doc.page_content) for doc in parsed.documents)
+    print(
+        f"  [{parsed.parser_name}] 解析完成："
+        f"{len(parsed.documents)} 个 document / {total_chars} 字符 ← {path.name}"
+    )
+    if parsed.output_dir:
+        print(f"  MinerU 输出：{parsed.output_dir}")
+    return parsed
+
+
+def load_document(file_path: str, document_id: str | None = None) -> list[Document]:
+    """兼容旧调用：仅返回解析后的 LangChain Document 列表。"""
+    return parse_document(file_path, document_id=document_id).documents
 
 
 # ── PDF 分块 ──────────────────────────────────────────────────
@@ -86,16 +88,19 @@ def split_markdown_documents(
     header_chunks: list[Document] = []
     for doc in docs:
         sections = _MD_HEADER_SPLITTER.split_text(doc.page_content)
-        source_path = doc.metadata.get("source", "")
         for section in sections:
-            section.metadata["source"] = source_path
+            # MinerU 的 page / block_types / asset_dir 等元数据必须继续向下游传播。
+            section.metadata.update(doc.metadata)
         header_chunks.extend(sections)
 
     final_chunks = splitter.split_documents(header_chunks)
 
     for chunk in final_chunks:
         source_path = chunk.metadata.get("source", "")
-        filename    = Path(source_path).stem if source_path else "未知文件"
+        base_source_name = chunk.metadata.get("source_name", "")
+        filename = base_source_name or (
+            Path(source_path).stem if source_path else "未知文件"
+        )
         parts = [
             chunk.metadata.get("H1", ""),
             chunk.metadata.get("H2", ""),
@@ -114,12 +119,24 @@ def split_markdown_documents(
 # ── 统一分块入口 ──────────────────────────────────────────────
 
 def split_documents(docs: list[Document], file_path: str) -> list[Document]:
-    """统一分块入口，根据文件类型自动选择分块策略"""
+    """统一分块入口：按 Parser 输出格式选择分块策略，而不是只看源文件扩展名。"""
     ext = Path(file_path).suffix.lower()
+    content_format = (
+        docs[0].metadata.get("content_format", "")
+        if docs else ""
+    )
+    parser_name = (
+        docs[0].metadata.get("parser", "")
+        if docs else ""
+    )
+
+    # MinerU 统一输出 Markdown，PDF/图片/Office 都走结构感知 Markdown 分块。
+    if content_format == "markdown" or parser_name in {"mineru", "markdown"}:
+        return split_markdown_documents(docs)
     if ext == ".pdf":
         return split_pdf_documents(docs)
-    elif ext in (".md", ".markdown"):
-        return split_markdown_documents(docs)
+    if ext == ".txt":
+        return _CHAR_SPLITTER.split_documents(docs)
     else:
         raise ValueError(f"不支持的文件类型：{ext}")
 
@@ -326,8 +343,8 @@ async def build_pipeline(
     """
     知识库建库完整流水线（五步）：
 
-      Step 1   读取文档（PyPDFLoader / TextLoader）
-      Step 2   智能分块（MarkdownHeaderTextSplitter / RecursiveCharacterTextSplitter）
+      Step 1   Parser Registry 解析（富文档优先 MinerU）
+      Step 2   智能分块（MinerU Markdown / 原生 Markdown / 文本）
       Step 2.5 Contextual RAG 上下文增强（LLM 并发，可跳过）
       Step 3   BGE-M3 Dense 嵌入 + 全库 BM25 稀疏权重重建
       Step 4   写入 Milvus（MilvusClient upsert）
@@ -343,7 +360,8 @@ async def build_pipeline(
 
     # Step 1：读取
     print("📖 Step 1/4  读取文档…")
-    docs = load_document(file_path)
+    parsed = parse_document(file_path, document_id=document_id)
+    docs = parsed.documents
 
     # Step 2：分块
     print("\n✂️  Step 2/4  智能分块…")

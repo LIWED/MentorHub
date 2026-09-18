@@ -1,6 +1,7 @@
 # backend/api/v1/qa.py
 
 import json
+import time
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -200,6 +201,7 @@ async def chat(
     current_user: dict = Depends(get_current_user),
 ):
     """智能问答：发送消息，获取 RAG 或 LLM 直答（非流式）。"""
+    request_started = time.perf_counter()
     graph = build_qa_graph()
     thread_id = build_thread_id(current_user["user_id"], req.session_id)
     config: dict = {"configurable": {"thread_id": thread_id}}
@@ -240,9 +242,20 @@ async def chat(
         "web_search_results": [],
     }
 
+    graph_started = time.perf_counter()
     try:
         result = await graph.ainvoke(initial_state, config=config)
     except Exception as e:
+        graph_elapsed_ms = (time.perf_counter() - graph_started) * 1000
+        total_elapsed_ms = (time.perf_counter() - request_started) * 1000
+        logger.error(
+            "qa.request_timing",
+            mode="chat",
+            status="error",
+            graph_ms=round(graph_elapsed_ms, 2),
+            total_ms=round(total_elapsed_ms, 2),
+            session_id=req.session_id,
+        )
         logger.error("chat.invoke_error", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -263,6 +276,19 @@ async def chat(
     except Exception as e:
         logger.warning("chat.persist_assistant_failed", error=str(e))
 
+    graph_elapsed_ms = (time.perf_counter() - graph_started) * 1000
+    total_elapsed_ms = (time.perf_counter() - request_started) * 1000
+    logger.info(
+        "qa.request_timing",
+        mode="chat",
+        status="ok",
+        graph_ms=round(graph_elapsed_ms, 2),
+        total_ms=round(total_elapsed_ms, 2),
+        session_id=req.session_id,
+        query_type=result.get("query_type"),
+        answer_mode=result.get("answer_mode"),
+    )
+
     return ChatResponse(
         session_id=req.session_id,
         answer=result.get("answer", ""),
@@ -279,6 +305,7 @@ async def chat_stream(
     current_user: dict = Depends(get_current_user),
 ):
     """智能问答流式接口（SSE），同时把用户和助手消息持久化。"""
+    request_started = time.perf_counter()
     graph = build_qa_graph()
     thread_id = build_thread_id(current_user["user_id"], req.session_id)
     config: dict = {"configurable": {"thread_id": thread_id}}
@@ -334,6 +361,8 @@ async def chat_stream(
         confidence = 0.0
         sources: list[str] = []
         answer_parts: list[str] = []
+        first_token_seen = False
+        graph_started = time.perf_counter()
 
         try:
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
@@ -350,6 +379,17 @@ async def chat_stream(
                 elif evt == "on_chat_model_stream" and node in _GENERATE_NODES:
                     chunk = event["data"].get("chunk")
                     if chunk and chunk.content:
+                        if not first_token_seen:
+                            first_token_seen = True
+                            logger.info(
+                                "qa.stream_first_token",
+                                ttft_ms=round(
+                                    (time.perf_counter() - request_started) * 1000,
+                                    2,
+                                ),
+                                session_id=req.session_id,
+                                node=node,
+                            )
                         chunk_text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                         answer_parts.append(chunk_text)
                         yield {
@@ -369,6 +409,14 @@ async def chat_stream(
                         if _conf is not None:
                             confidence = _conf
         except Exception as e:
+            logger.error(
+                "qa.request_timing",
+                mode="stream",
+                status="error",
+                graph_ms=round((time.perf_counter() - graph_started) * 1000, 2),
+                total_ms=round((time.perf_counter() - request_started) * 1000, 2),
+                session_id=req.session_id,
+            )
             logger.error("chat_stream.error", error=str(e), exc_info=True)
             yield {
                 "data": json.dumps(
@@ -393,6 +441,16 @@ async def chat_stream(
                 )
             except Exception as e:
                 logger.warning("chat_stream.persist_assistant_failed", error=str(e))
+
+        logger.info(
+            "qa.request_timing",
+            mode="stream",
+            status="ok",
+            graph_ms=round((time.perf_counter() - graph_started) * 1000, 2),
+            total_ms=round((time.perf_counter() - request_started) * 1000, 2),
+            session_id=req.session_id,
+            answer_mode=answer_mode,
+        )
 
         yield {
             "data": json.dumps(

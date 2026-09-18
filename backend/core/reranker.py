@@ -1,5 +1,6 @@
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +41,7 @@ class BGEReranker:
     """
 
     _instance: Optional["BGEReranker"] = None
+    _instance_lock = threading.Lock()
 
     def __init__(self):
         os.environ["ACCELERATE_USE_META_DEVICE"] = "0"
@@ -57,14 +59,17 @@ class BGEReranker:
 
         logger.info("reranker.loading", model_id=model_id, device=device)
         self._model = CrossEncoder(model_id, device=device, max_length=512)
+        self._predict_lock = threading.Lock()
         # print(f'self._model is {self._model}')
         logger.info("reranker.loaded", model_id=model_id)
 
     @classmethod
     def get_instance(cls) -> "BGEReranker":
-        """获取单例，首次调用时加载模型"""
+        """获取线程安全单例，避免并发检索时重复加载模型。"""
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def rerank_with_confidence(
@@ -99,7 +104,10 @@ class BGEReranker:
         # print(f'pairs[0]: {pairs[0]}')
         # print(f'len(pairs): {len(pairs)}')
         # CrossEncoder 默认 sigmoid 激活，predict() 直接输出 [0, 1] 概率
-        scores: list[float] = self._model.predict(pairs).tolist()
+        # CrossEncoder/PyTorch 模型对象由多个检索线程共享。
+        # 串行化 predict，避免并发 forward/设备迁移产生非线程安全状态。
+        with self._predict_lock:
+            scores: list[float] = self._model.predict(pairs).tolist()
         # print(f'scores: {scores}')
         ranked = sorted(
             [

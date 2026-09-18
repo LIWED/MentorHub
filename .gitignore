@@ -71,6 +71,7 @@ pnpm-debug.log*
 
 # ===== 9. 本地工具产物 =====
 docs/
+data/mineru/
 .codegraph/
 .superpowers/
 .reasonix/
