@@ -1,6 +1,7 @@
 # backend/agents/qa/nodes.py
 
 import asyncio
+import json
 import uuid
 
 from sqlalchemy import text
@@ -14,6 +15,9 @@ from backend.agents.qa.prompts import (
     DIRECT_ANSWER_PROMPT,
     GENERAL_ANSWER_PROMPT,
     RAG_STRATEGY_PROMPT,
+    ITERATIVE_PLAN_PROMPT,
+    ITERATIVE_EXPAND_PROMPT,
+    ITERATIVE_SUFFICIENCY_PROMPT,
     SYSTEM_PROMPT,
 )
 from backend.core.llm_factory import get_llm
@@ -32,9 +36,12 @@ logger = get_logger(__name__)
 
 # ── 检索相关常量 ───────────────────────────────────────────────
 MAX_BROAD_QUERIES        = 3   # BROAD 分支最多并行的子 Query 数
+MAX_ITERATIVE_QUESTIONS  = 3   # ITERATIVE：最多处理 3 个逻辑问题
+MAX_ITERATIONS           = 3   # ITERATIVE：最多 3 轮依赖检索
 RECALL_TOP_K_PRECISE     = 8   # PRECISE：直接检索召回数
 RECALL_TOP_K_VAGUE       = 10  # VAGUE：HyDE 语义扩充后多召回些
 RECALL_TOP_K_BROAD_PER   = 4   # BROAD：每个子 Query 的召回数
+RECALL_TOP_K_ITERATIVE   = 6   # ITERATIVE：每个展开 Query 的召回数
 RERANK_TOP_K             = 3   # 精排后保留的最终 chunk 数
 
 def _get_message_content(msg) -> str:
@@ -159,6 +166,23 @@ _BROAD_QUERY_HINTS = (
 )
 
 
+def _looks_iterative_query(query: str) -> bool:
+    """规则层识别明显的前后依赖复合问题。"""
+    q = query.strip().lower()
+    dependency_hints = (
+        "它们", "这些", "上述", "各自", "分别", "其中",
+        "前者", "后者", "对应", "每个", "各个",
+    )
+    discovery_hints = (
+        "哪些", "哪几", "有什么", "有哪些", "是什么",
+        "谁", "什么", "负责", "作用", "工作",
+    )
+    return (
+        any(hint in q for hint in dependency_hints)
+        and any(hint in q for hint in discovery_hints)
+    )
+
+
 def _rule_classify_general(query: str) -> bool:
     """规则层：是否为闲聊/时间/打招呼类（→ GENERAL）"""
     q = query.strip().lower()
@@ -175,6 +199,8 @@ def _rule_classify_specialized(query: str) -> bool:
 def _fast_rag_strategy(query: str) -> str:
     """规则快判 RAG 策略（< 1ms）"""
     q = query.strip().lower()
+    if _looks_iterative_query(q):
+        return "ITERATIVE"
     if len(q) <= 6 and any(kw in q for kw in _VAGUE_QUERY_HINTS):
         return "VAGUE"
     if any(kw in q for kw in _BROAD_QUERY_HINTS):
@@ -190,7 +216,7 @@ async def _determine_rag_strategy(query: str) -> str:
             HumanMessage(content=RAG_STRATEGY_PROMPT.format(query=query))
         ])
         label = _get_message_content(resp).strip().upper()
-        if label in ("PRECISE", "VAGUE", "BROAD"):
+        if label in ("PRECISE", "VAGUE", "BROAD", "ITERATIVE"):
             return label
     except Exception as e:
         logger.warning("classify_query.rag_strategy_failed", error=str(e))
@@ -207,6 +233,10 @@ async def _determine_rag_strategy_fast(query: str) -> str:
     strategy = _fast_rag_strategy(query)
     if strategy == "PRECISE":
         return strategy
+    # ITERATIVE 的规则只作为候选提示，始终交给 LLM 确认依赖关系，
+    # 避免把“已知实体 + 分别询问”的并行问题误判成依赖式检索。
+    if strategy == "ITERATIVE":
+        return await _determine_rag_strategy(query)
     if len(query.strip()) >= 18:
         return await _determine_rag_strategy(query)
     return strategy
@@ -264,6 +294,13 @@ async def classify_query_node(state: QAState) -> dict:
         "existing_summary":  existing_summary,
         "rewritten_queries": [],
         "hyde_document":     None,
+        "iterative_seed_query": None,
+        "iterative_intent": None,
+        "iterative_plan": [],
+        "iterative_entities": [],
+        "iterative_queries": [],
+        "iterative_results": [],
+        "iteration_count": 0,
     }
     if auto_web and not state.get("enable_web_search", False):
         _base["enable_web_search"] = True
@@ -444,6 +481,355 @@ async def multi_query_rewrite_node(state: QAState) -> dict:
     )
 
     return {"rewritten_queries": rewritten}
+
+
+# ──────────────────────────────────────────────────────────────
+# 节点：iterative_plan / iterative_retrieve — 依赖式多轮检索
+# ──────────────────────────────────────────────────────────────
+
+def _parse_json_object(raw: str) -> dict:
+    """从 LLM 文本中提取第一个 JSON object。"""
+    text_value = raw.strip()
+    start = text_value.find("{")
+    end = text_value.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("LLM output does not contain a JSON object")
+    value = json.loads(text_value[start:end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("LLM JSON root must be an object")
+    return value
+
+
+def _normalize_iterative_plan(data: dict, fallback_query: str) -> list[dict]:
+    """限制最多 3 个问题，并清洗 id / depends_on，避免非法依赖或循环。"""
+    raw_questions = data.get("questions")
+    if not isinstance(raw_questions, list):
+        raw_questions = []
+
+    plan: list[dict] = []
+    valid_ids: set[str] = set()
+    for index, item in enumerate(raw_questions[:MAX_ITERATIVE_QUESTIONS], 1):
+        if not isinstance(item, dict):
+            continue
+        qid = f"q{len(plan) + 1}"
+        query = str(item.get("query") or item.get("intent") or "").strip()
+        intent = str(item.get("intent") or query).strip()
+        if not query:
+            continue
+
+        raw_deps = item.get("depends_on") or []
+        if not isinstance(raw_deps, list):
+            raw_deps = []
+        deps = [str(dep) for dep in raw_deps if str(dep) in valid_ids]
+        if not plan:
+            deps = []
+
+        plan.append({
+            "id": qid,
+            "query": query,
+            "intent": intent,
+            "depends_on": deps,
+        })
+        valid_ids.add(qid)
+
+    if not plan:
+        plan = [{
+            "id": "q1",
+            "query": fallback_query,
+            "intent": fallback_query,
+            "depends_on": [],
+        }]
+    return plan
+
+
+def _format_iterative_evidence(
+    evidence_by_id: dict[str, list],
+    question_ids: list[str] | None = None,
+    *,
+    max_docs_per_question: int = 3,
+) -> str:
+    """把上一轮检索证据（含文件名 metadata）整理给 Query Expansion / Sufficiency。"""
+    ids = question_ids or list(evidence_by_id.keys())
+    parts: list[str] = []
+    for qid in ids:
+        docs = evidence_by_id.get(qid, [])
+        if not docs:
+            parts.append(f"[{qid}] 无有效检索证据")
+            continue
+        for idx, doc in enumerate(docs[:max_docs_per_question], 1):
+            source = (doc.metadata or {}).get("source_name", "课程文档")
+            parts.append(
+                f"[{qid}-证据{idx}] 来源：{source}\n"
+                f"{doc.content[:700]}"
+            )
+    return "\n\n".join(parts) if parts else "无有效检索证据"
+
+
+async def iterative_plan_node(state: QAState) -> dict:
+    """为 ITERATIVE Query 生成最多 3 个带依赖关系的逻辑问题。"""
+    query = state.get("rewritten_query") or state["original_query"]
+    try:
+        llm = get_llm("qa", temperature=0)
+        response = await llm.ainvoke([
+            HumanMessage(content=ITERATIVE_PLAN_PROMPT.format(query=query))
+        ])
+        plan = _normalize_iterative_plan(
+            _parse_json_object(_get_message_content(response)),
+            query,
+        )
+    except Exception as e:
+        logger.warning("iterative_plan.failed", error=str(e))
+        plan = _normalize_iterative_plan({}, query)
+
+    seed_query = plan[0]["query"]
+    dependent_intent = "；".join(
+        item["intent"] for item in plan[1:]
+    ) or None
+
+    logger.info(
+        "iterative_plan.done",
+        questions=len(plan),
+        plan=plan,
+    )
+    return {
+        "iterative_seed_query": seed_query,
+        "iterative_intent": dependent_intent,
+        "iterative_plan": plan,
+        "iterative_entities": [],
+        "iterative_queries": [],
+        "iterative_results": [],
+        "iteration_count": 0,
+    }
+
+
+async def _expand_iterative_question(question: dict, dependency_evidence: str) -> tuple[list[str], list[str]]:
+    """根据依赖证据，把一个逻辑问题展开成最多 3 个可直接检索的 Query。"""
+    if not question.get("depends_on"):
+        return [], [question["query"]]
+
+    try:
+        llm = get_llm("qa", temperature=0)
+        response = await llm.ainvoke([
+            HumanMessage(content=ITERATIVE_EXPAND_PROMPT.format(
+                query=question["query"],
+                intent=question["intent"],
+                evidence=dependency_evidence,
+            ))
+        ])
+        data = _parse_json_object(_get_message_content(response))
+        entities = [
+            str(item).strip()
+            for item in (data.get("entities") or [])
+            if str(item).strip()
+        ][:MAX_ITERATIVE_QUESTIONS]
+        queries = [
+            str(item).strip()
+            for item in (data.get("queries") or [])
+            if str(item).strip()
+        ][:MAX_ITERATIVE_QUESTIONS]
+        if queries:
+            return entities, queries
+    except Exception as e:
+        logger.warning(
+            "iterative_expand.failed",
+            question_id=question.get("id"),
+            error=str(e),
+        )
+
+    return [], [question["query"]]
+
+
+async def iterative_retrieve_node(state: QAState) -> dict:
+    """
+    执行受控 Iterative Retrieval：
+    - 最多 3 个逻辑问题；
+    - 最多 3 轮；
+    - 同一依赖层并行检索；
+    - 后续 Query 只基于前轮证据展开。
+    """
+    from backend.core.reranker import retrieve
+
+    plan = (state.get("iterative_plan") or [])[:MAX_ITERATIVE_QUESTIONS]
+    if not plan:
+        plan = _normalize_iterative_plan(
+            {},
+            state.get("rewritten_query") or state["original_query"],
+        )
+
+    tenant_id = state["tenant_id"]
+    course_id = state.get("course_id")
+    loop = asyncio.get_running_loop()
+
+    completed: set[str] = set()
+    evidence_by_id: dict[str, list] = {}
+    search_queries_by_id: dict[str, list[str]] = {}
+    all_entities: list[str] = []
+    all_queries: list[str] = []
+    iteration_count = 0
+
+    while len(completed) < len(plan) and iteration_count < MAX_ITERATIONS:
+        ready = [
+            question for question in plan
+            if question["id"] not in completed
+            and all(dep in completed for dep in question.get("depends_on", []))
+        ]
+        if not ready:
+            logger.warning(
+                "iterative_retrieve.no_ready_question",
+                completed=sorted(completed),
+                plan=plan,
+            )
+            break
+
+        iteration_count += 1
+
+        expansion_tasks = []
+        for question in ready:
+            dependency_evidence = _format_iterative_evidence(
+                evidence_by_id,
+                question.get("depends_on", []),
+            )
+            expansion_tasks.append(
+                _expand_iterative_question(question, dependency_evidence)
+            )
+        expanded = await asyncio.gather(*expansion_tasks)
+
+        retrieval_jobs: list[tuple[str, str]] = []
+        for question, (entities, queries) in zip(ready, expanded):
+            qid = question["id"]
+            search_queries_by_id[qid] = queries
+            for entity in entities:
+                if entity not in all_entities:
+                    all_entities.append(entity)
+            for search_query in queries:
+                if search_query not in all_queries:
+                    all_queries.append(search_query)
+                retrieval_jobs.append((qid, search_query))
+
+        async def retrieve_one(qid: str, search_query: str):
+            docs, _ = await loop.run_in_executor(
+                None,
+                lambda: retrieve(
+                    search_query,
+                    tenant_id,
+                    course_id,
+                    recall_top_k=RECALL_TOP_K_ITERATIVE,
+                    rerank_top_k=RERANK_TOP_K,
+                ),
+            )
+            return qid, docs
+
+        retrieved = await asyncio.gather(*[
+            retrieve_one(qid, search_query)
+            for qid, search_query in retrieval_jobs
+        ])
+
+        for qid, docs in retrieved:
+            current = evidence_by_id.setdefault(qid, [])
+            seen = {doc.content[:160] for doc in current}
+            for doc in docs:
+                key = doc.content[:160]
+                if key not in seen:
+                    current.append(doc)
+                    seen.add(key)
+            current.sort(key=lambda doc: doc.score, reverse=True)
+
+        completed.update(question["id"] for question in ready)
+        logger.info(
+            "iterative_retrieve.iteration_done",
+            iteration=iteration_count,
+            questions=[q["id"] for q in ready],
+            completed=sorted(completed),
+        )
+
+    # 每个逻辑问题优先保留自己的 Top-2，避免最终上下文被 seed 文档完全占满。
+    final_docs = []
+    seen_final: set[str] = set()
+    for question in plan:
+        for doc in evidence_by_id.get(question["id"], [])[:2]:
+            key = doc.content[:160]
+            if key not in seen_final:
+                final_docs.append(doc)
+                seen_final.add(key)
+
+    ranked_chunks = [
+        {
+            "content": doc.content,
+            "score": doc.score,
+            "metadata": doc.metadata,
+        }
+        for doc in final_docs[:MAX_ITERATIVE_QUESTIONS * 2]
+    ]
+
+    question_scores = [
+        evidence_by_id[question["id"]][0].score
+        if evidence_by_id.get(question["id"]) else 0.0
+        for question in plan
+    ]
+    confidence = (
+        sum(question_scores) / len(question_scores)
+        if question_scores else 0.0
+    )
+
+    sufficiency_evidence = _format_iterative_evidence(
+        evidence_by_id,
+        [item["id"] for item in plan],
+        max_docs_per_question=2,
+    )
+    is_high_confidence = False
+    if ranked_chunks:
+        try:
+            llm = get_llm("qa", temperature=0)
+            response = await llm.ainvoke([
+                HumanMessage(content=ITERATIVE_SUFFICIENCY_PROMPT.format(
+                    query=state["original_query"],
+                    plan=json.dumps(plan, ensure_ascii=False),
+                    evidence=sufficiency_evidence,
+                ))
+            ])
+            is_high_confidence = (
+                _get_message_content(response).strip().upper() == "SUFFICIENT"
+            )
+        except Exception as e:
+            logger.warning("iterative_sufficiency.failed", error=str(e))
+            # LLM 判定失败时保守回退：所有逻辑问题至少都有一条证据才允许 RAG。
+            is_high_confidence = all(
+                bool(evidence_by_id.get(item["id"])) for item in plan
+            )
+
+    iterative_results = [
+        {
+            "id": question["id"],
+            "intent": question["intent"],
+            "depends_on": question.get("depends_on", []),
+            "queries": search_queries_by_id.get(question["id"], []),
+            "evidence_count": len(evidence_by_id.get(question["id"], [])),
+            "top_score": (
+                evidence_by_id[question["id"]][0].score
+                if evidence_by_id.get(question["id"]) else 0.0
+            ),
+        }
+        for question in plan
+    ]
+
+    logger.info(
+        "iterative_retrieve.done",
+        iterations=iteration_count,
+        questions=len(plan),
+        entities=all_entities,
+        queries=all_queries,
+        confidence=round(confidence, 4),
+        sufficient=is_high_confidence,
+    )
+    return {
+        "ranked_chunks": ranked_chunks,
+        "confidence": confidence,
+        "is_high_confidence": is_high_confidence,
+        "iterative_entities": all_entities,
+        "iterative_queries": all_queries,
+        "iterative_results": iterative_results,
+        "iteration_count": iteration_count,
+    }
 
 
 # ──────────────────────────────────────────────────────────────

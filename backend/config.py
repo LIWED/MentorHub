@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     bge_m3_model_path: str = "./models/embedding/bge-m3"  # 嵌入模型
     finetuned_classifier_path: str = "./models/classifier/finetune"
 
+    # ── MinerU（仅知识入库阶段）──
+    # 推荐指向独立 MinerU 环境，避免污染在线 RAG 的 torch/transformers 依赖。
+    mineru_python_executable: str = ""
+    mineru_tier: str = "basic"  # flash / basic / standard / advanced
+    mineru_output_root: str = "./data/mineru"
+    mineru_timeout_seconds: int = 900
+    mineru_model_source: str = ""  # 可选：modelscope / huggingface
+
     # ── JWT 认证 ──
     jwt_secret_key: str  # 必填：签发登录令牌用的密钥
     jwt_algorithm: str = "HS256"  # 签名算法

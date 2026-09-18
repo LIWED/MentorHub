@@ -25,9 +25,18 @@ class QAState(TypedDict):
     # ── ③ Query 处理中间结果──────────────────────────────────────
     original_query:    str         # 用户原始输入，全程不变
     rewritten_query:   str         # specialized：结合历史改写后的独立检索 Query
-    query_type:        str         # GENERAL / PRECISE / VAGUE / BROAD
+    query_type:        str         # GENERAL / PRECISE / VAGUE / BROAD / ITERATIVE
     rewritten_queries: list[str]   # BROAD 分支：Multi-Query 改写后的子 Query 列表
     hyde_document:     Optional[str]  # VAGUE 分支：HyDE 生成的假设文档文本
+
+    # ITERATIVE 分支：最多 3 个逻辑问题、最多 3 轮依赖检索
+    iterative_seed_query: Optional[str]
+    iterative_intent:     Optional[str]
+    iterative_plan:       list[dict]
+    iterative_entities:   list[str]
+    iterative_queries:    list[str]
+    iterative_results:    list[dict]
+    iteration_count:      int
 
     # ── ④ 检索与精排结果─────────────────────────────────────────
     # retrieve() 内部已处理 BGE-M3 编码，State 无需存储中间向量
