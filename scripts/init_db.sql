@@ -206,15 +206,47 @@ CREATE TABLE IF NOT EXISTS qa_sessions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id       VARCHAR(64) NOT NULL DEFAULT 'tenant_default',
     student_id      UUID REFERENCES users(id),
-    thread_id       VARCHAR(128) NOT NULL UNIQUE,
+    thread_id       VARCHAR(256) NOT NULL UNIQUE,
+    session_id      VARCHAR(128),
+    title           VARCHAR(128),
     summary         TEXT,
     summary_version INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- 兼容已存在的旧 qa_sessions 表
+ALTER TABLE qa_sessions ADD COLUMN IF NOT EXISTS session_id VARCHAR(128);
+ALTER TABLE qa_sessions ADD COLUMN IF NOT EXISTS title VARCHAR(128);
+ALTER TABLE qa_sessions ALTER COLUMN thread_id TYPE VARCHAR(256);
+UPDATE qa_sessions
+SET session_id = split_part(thread_id, '_session_', 2)
+WHERE session_id IS NULL AND position('_session_' IN thread_id) > 0;
+
 CREATE INDEX idx_qa_sessions_tenant_id ON qa_sessions (tenant_id);
 CREATE INDEX idx_qa_sessions_student_id ON qa_sessions (student_id);
 CREATE INDEX idx_qa_sessions_thread_id ON qa_sessions (thread_id);
+CREATE INDEX IF NOT EXISTS idx_qa_sessions_session_id ON qa_sessions (session_id);
+
+-- ============================================================
+-- 问答消息表：产品层完整聊天记录持久化
+-- ============================================================
+CREATE TABLE IF NOT EXISTS qa_messages (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id   VARCHAR(64) NOT NULL DEFAULT 'tenant_default',
+    student_id  UUID REFERENCES users(id),
+    session_id  VARCHAR(128) NOT NULL,
+    thread_id   VARCHAR(256) NOT NULL,
+    role        VARCHAR(16) NOT NULL CHECK (role IN ('user', 'assistant')),
+    content     TEXT NOT NULL,
+    sources     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    answer_mode VARCHAR(32),
+    confidence  DOUBLE PRECISION,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_qa_messages_student_session
+    ON qa_messages (student_id, session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_qa_messages_thread_id
+    ON qa_messages (thread_id, created_at);
 
 -- ============================================================
 -- 自动更新 updated_at 触发器

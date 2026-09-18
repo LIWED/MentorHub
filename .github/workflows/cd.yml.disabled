@@ -1,0 +1,172 @@
+name: MentorHub CD
+
+on:
+  workflow_run:
+    workflows: ["MentorHub CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-images:
+    name: Build and publish images
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    outputs:
+      backend_image: ${{ steps.images.outputs.backend }}
+      frontend_image: ${{ steps.images.outputs.frontend }}
+      image_tag: ${{ steps.images.outputs.tag }}
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Prepare image names
+        id: images
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "backend=ghcr.io/${owner}/mentorhub-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/${owner}/mentorhub-frontend" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.images.outputs.backend }}:${{ steps.images.outputs.tag }}
+            ${{ steps.images.outputs.backend }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+          tags: |
+            ${{ steps.images.outputs.frontend }}:${{ steps.images.outputs.tag }}
+            ${{ steps.images.outputs.frontend }}:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy:
+    name: Deploy production
+    needs: build-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      GHCR_TOKEN: ${{ github.token }}
+      GHCR_USER: ${{ github.repository_owner }}
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Check deployment configuration
+        id: config
+        shell: bash
+        run: |
+          if [[ -n "$DEPLOY_HOST" && -n "$DEPLOY_USER" && -n "$DEPLOY_SSH_KEY" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Deployment skipped: configure DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY repository secrets."
+          fi
+
+      - name: Configure SSH
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$port" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload deployment files
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          path="${DEPLOY_PATH:-/opt/mentorhub}"
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+
+          ssh -p "$port" "$target" "mkdir -p '$path/scripts'"
+          scp -P "$port" docker-compose.prod.yml "$target:$path/docker-compose.prod.yml"
+          scp -P "$port" .env.production.example "$target:$path/.env.production.example"
+          scp -P "$port" scripts/init_db.sql "$target:$path/scripts/init_db.sql"
+
+      - name: Authenticate server to GHCR
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          printf '%s' "$GHCR_TOKEN" | ssh -p "$port" "$target" \
+            "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+
+      - name: Deploy tested images
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        env:
+          BACKEND_IMAGE: ${{ needs.build-images.outputs.backend_image }}:${{ needs.build-images.outputs.image_tag }}
+          FRONTEND_IMAGE: ${{ needs.build-images.outputs.frontend_image }}:${{ needs.build-images.outputs.image_tag }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          path="${DEPLOY_PATH:-/opt/mentorhub}"
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+
+          ssh -p "$port" "$target" "
+            set -e
+            cd '$path'
+
+            if [ ! -f .env.production ]; then
+              echo 'Missing $path/.env.production. Create it from .env.production.example before the first deployment.'
+              exit 1
+            fi
+
+            BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' \
+              docker compose --env-file .env.production -f docker-compose.prod.yml pull backend frontend
+
+            BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' \
+              docker compose --env-file .env.production -f docker-compose.prod.yml \
+              up -d --wait --wait-timeout 300
+
+            docker image prune -f
+          "

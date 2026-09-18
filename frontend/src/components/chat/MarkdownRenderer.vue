@@ -9,11 +9,11 @@ import hljs from 'highlight.js'
 
 const props = defineProps<{ content: string }>()
 
-const md = new MarkdownIt({
+const md: MarkdownIt = new MarkdownIt({
   html: false,
   linkify: true,
   typographer: true,
-  highlight(str, lang) {
+  highlight(str: string, lang: string): string {
     if (lang && hljs.getLanguage(lang)) {
       try {
         return (

@@ -4,7 +4,7 @@
 # ① 系统提示（所有生成节点共用，注入为 SystemMessage）
 # ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是 EduAgent 智能助教，专门辅助 IT 培训课程的学员学习。
+SYSTEM_PROMPT = """你是 MentorHub 智能助教，专门辅助 IT 培训课程的学员学习。
 
 【你的角色】
 - 解答学员关于课程内容的技术问题
@@ -119,7 +119,7 @@ DIRECT_ANSWER_PROMPT = """请根据你的知识回答以下技术问题。
 # ⑦ 通用问题直答（query_type=GENERAL，跳过 RAG，无需检索）
 # ──────────────────────────────────────────────────────────────
 
-GENERAL_ANSWER_PROMPT = """你是 EduAgent 智能助教，专门辅助 IT 培训课程的学员学习。
+GENERAL_ANSWER_PROMPT = """你是 MentorHub 智能助教，专门辅助 IT 培训课程的学员学习。
 
 【当前时间】{current_time}
 

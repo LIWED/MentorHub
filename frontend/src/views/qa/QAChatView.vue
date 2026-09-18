@@ -109,6 +109,7 @@ import { ElMessage } from 'element-plus'
 import ChatBubble from '@/components/chat/ChatBubble.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import { useAuthStore } from '@/stores/auth'
+import { qaApi } from '@/api/qa'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -120,6 +121,7 @@ interface Session {
   id: string
   name: string
   messages: Message[]
+  loaded?: boolean
 }
 
 const router = useRouter()
@@ -165,26 +167,58 @@ const answerModeLabel = computed(() => {
 
 function newSession() {
   const id = `student_session_${uuidv4()}`
-  const session: Session = { id, name: `会话 ${sessions.value.length + 1}`, messages: [] }
+  const session: Session = { id, name: `会话 ${sessions.value.length + 1}`, messages: [], loaded: true }
   sessions.value.unshift(session)
   switchSession(id)
 }
 
-function switchSession(id: string) {
+async function switchSession(id: string) {
   if (isStreaming.value) return
   currentSessionId.value = id
   const s = sessions.value.find(s => s.id === id)
+  if (!s) {
+    messages.value = []
+    return
+  }
+
+  if (!s.loaded) {
+    try {
+      const { data } = await qaApi.getHistory(id)
+      s.messages = data.messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        sources: m.sources ?? [],
+      }))
+      s.loaded = true
+    } catch (err) {
+      ElMessage.error('加载历史会话失败')
+      console.error('[QA history]', err)
+    }
+  }
+
   // 直接引用 session.messages，后续只需操作 messages.value，不再单独操作 session.messages
-  messages.value = s ? s.messages : []
-  scrollToBottom()
+  messages.value = s.messages
+  await scrollToBottom()
 }
 
-function deleteSession(id: string) {
+async function deleteSession(id: string) {
   const idx = sessions.value.findIndex(s => s.id === id)
   if (idx === -1) return
+
+  try {
+    // 尚未发过消息的新会话还没落库，404 可直接忽略
+    await qaApi.deleteSession(id)
+  } catch (err: any) {
+    if (err?.response?.status !== 404) {
+      ElMessage.error('删除会话失败')
+      return
+    }
+  }
+
   sessions.value.splice(idx, 1)
   if (currentSessionId.value === id) {
-    sessions.value.length > 0 ? switchSession(sessions.value[0].id) : newSession()
+    if (sessions.value.length > 0) await switchSession(sessions.value[0].id)
+    else newSession()
   }
 }
 
@@ -318,8 +352,29 @@ async function scrollToBottom() {
   }
 }
 
-onMounted(() => {
-  newSession()
+async function loadSessions() {
+  try {
+    const { data } = await qaApi.listSessions()
+    sessions.value = data.items.map(item => ({
+      id: item.session_id,
+      name: item.title || '新会话',
+      messages: [],
+      loaded: false,
+    }))
+
+    if (sessions.value.length > 0) {
+      await switchSession(sessions.value[0].id)
+    } else {
+      newSession()
+    }
+  } catch (err) {
+    console.error('[QA sessions]', err)
+    newSession()
+  }
+}
+
+onMounted(async () => {
+  await loadSessions()
 })
 </script>
 

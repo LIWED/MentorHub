@@ -21,7 +21,8 @@ export interface PendingReviewItem {
 
 export interface ReviewDetail {
   submission_id: string
-  student_id: string
+  student_id?: string
+  status?: string
   pre_review_summary: {
     total_score: number
     full_score: number

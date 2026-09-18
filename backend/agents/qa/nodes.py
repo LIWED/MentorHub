@@ -868,6 +868,8 @@ async def save_memory_node(state: QAState) -> dict:
     thread_id  = build_thread_id(student_id, session_id)
     summary    = state.get("existing_summary")
 
+    summary_changed = False
+
     # ── 条件触发增量摘要：只压缩最近 10 轮滑动窗口之外的新一批旧消息 ──
     if state.get("should_summarize", False):
         msgs_to_compress = get_summary_batch(
@@ -880,6 +882,7 @@ async def save_memory_node(state: QAState) -> dict:
                     messages=msgs_to_compress,
                     existing_summary=summary,
                 )
+                summary_changed = True
                 logger.info(
                     "save_memory.summary_compressed",
                     thread_id=thread_id,
@@ -888,30 +891,41 @@ async def save_memory_node(state: QAState) -> dict:
             except Exception as e:
                 logger.warning("save_memory.compress_failed", error=str(e))
 
-    # ── UPSERT 到 qa_sessions 表 ──────────────────────────────────
-        try:
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
+    # ── qa_sessions 每轮都确保存在；摘要版本只在真正生成新摘要时递增 ──
+    try:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    text("""
+                        INSERT INTO qa_sessions
+                            (id, tenant_id, student_id, thread_id, session_id, summary_version)
+                        VALUES (:id, :tenant_id, :student_id, :thread_id, :session_id, 0)
+                        ON CONFLICT (thread_id) DO UPDATE
+                            SET session_id = COALESCE(qa_sessions.session_id, EXCLUDED.session_id),
+                                updated_at = NOW()
+                    """),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "tenant_id": tenant_id,
+                        "student_id": student_id,
+                        "thread_id": thread_id,
+                        "session_id": session_id,
+                    },
+                )
+
+                if summary_changed:
                     await session.execute(
                         text("""
-                            INSERT INTO qa_sessions
-                                (id, tenant_id, student_id, thread_id, summary, summary_version)
-                            VALUES (:id, :tenant_id, :student_id, :thread_id, :summary, 1)
-                            ON CONFLICT (thread_id) DO UPDATE
-                                SET summary         = EXCLUDED.summary,
-                                    summary_version = qa_sessions.summary_version + 1,
-                                    updated_at      = NOW()
+                            UPDATE qa_sessions
+                            SET summary = :summary,
+                                summary_version = summary_version + 1,
+                                updated_at = NOW()
+                            WHERE thread_id = :thread_id
                         """),
-                        {
-                            "id":         str(uuid.uuid4()),
-                            "tenant_id":  tenant_id,
-                            "student_id": student_id,
-                            "thread_id":  thread_id,
-                            "summary":    summary,
-                        },
+                        {"summary": summary, "thread_id": thread_id},
                     )
-        except Exception as e:
-            logger.warning("save_memory.db_write_failed", error=str(e))
+    except Exception as e:
+        logger.warning("save_memory.db_write_failed", error=str(e))
 
     return {}
 

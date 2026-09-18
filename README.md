@@ -250,7 +250,7 @@ MentorHub/
 ├─ tests/
 │  └─ resume/
 ├─ docker-compose.yml
-├─ requirments.txt
+├─ requirements.txt
 └─ .env.example
 ```
 
@@ -272,10 +272,10 @@ cd MentorHub
 ```bash
 conda create -n mentorhub python=3.11 -y
 conda activate mentorhub
-pip install -r requirments.txt
+pip install -r requirements.txt
 ```
 
-> 当前仓库依赖文件名为 `requirments.txt`，请按仓库中的实际文件名安装。
+> 当前仓库依赖文件名为 `requirements.txt`，请按仓库中的实际文件名安装。
 
 ### 3. 配置环境变量
 

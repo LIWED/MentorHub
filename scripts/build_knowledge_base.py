@@ -124,9 +124,6 @@ def split_documents(docs: list[Document], file_path: str) -> list[Document]:
         raise ValueError(f"不支持的文件类型：{ext}")
 
 
-
-# scripts/build_knowledge_base.py（阶段版追加，5.5 补 Milvus 写入后形成完整版）
-
 import uuid
 import sys
 from pathlib import Path
@@ -272,9 +269,6 @@ async def add_context(
         page_content 已被就地修改（拼接上下文）的 list[Document]
     """
     # 拼接全文供 LLM 参考（截断 8000 字，避免超出模型 context 长度）
-    # print(f'docs-->{len(docs)}')
-    # print(f'docs-->{docs[0]}')
-    # print("*"*80)
     full_doc_text = "\n\n".join(d.page_content for d in docs)[:8000]
     # print(f'full_doc_text-->{full_doc_text}')
 
@@ -286,8 +280,6 @@ async def add_context(
         generate_chunk_context(llm, full_doc_text, c.page_content, semaphore)
         for c in chunks
     ])
-    # print(f'contexts-->{len(contexts)}')
-    # print(f'contexts-->{contexts[0]}')
     enriched = 0
     for chunk, ctx in zip(chunks, contexts):
         if ctx:

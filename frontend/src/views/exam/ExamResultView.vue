@@ -33,12 +33,12 @@
             <div class="weak-tags">
               <el-tag
                 v-for="wp in review.weak_points"
-                :key="wp.knowledge_point"
+                :key="wp.tag"
                 type="danger"
                 size="small"
                 style="margin: 4px"
               >
-                {{ wp.knowledge_point }}（错 {{ wp.wrong_count }} 题）
+                {{ wp.tag }}（错 {{ wp.wrong_count }} 题）
               </el-tag>
             </div>
             <div v-if="review.weak_points_summary" class="weak-summary">
