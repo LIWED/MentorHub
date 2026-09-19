@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <filter id="logo-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="6" dy="10" stdDeviation="10" flood-color="#64748b" flood-opacity="0.35" />
+      <feDropShadow dx="-4" dy="-4" stdDeviation="8" flood-color="#ffffff" flood-opacity="0.8" />
+    </filter>
+    <linearGradient id="cap-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+    <linearGradient id="tassel-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="60%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#b45309" />
+    </linearGradient>
+    <linearGradient id="book-pages" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </linearGradient>
+  </defs>
+
+  <g filter="url(#logo-shadow)">
+    <!-- 底部展开的立体书籍 (Open Book) -->
+    <path d="M 46 170 Q 88 155 128 175 Q 168 155 210 170 L 210 196 Q 168 180 128 200 Q 88 180 46 196 Z" fill="url(#book-pages)" />
+    <!-- 书本阴影厚度 -->
+    <path d="M 46 196 Q 88 180 128 200 Q 168 180 210 196 L 206 206 Q 168 190 128 210 Q 88 190 50 206 Z" fill="#94a3b8" />
+
+    <!-- 学士帽下半部圆顶 (Skullcap) -->
+    <path d="M 80 110 C 80 150 176 150 176 110 Z" fill="#1e293b" />
+
+    <!-- 学士帽菱形顶板 (Mortarboard Rhombus) -->
+    <polygon points="128,48 226,92 128,136 30,92" fill="url(#cap-grad)" />
+    <!-- 顶板边缘厚度立体感 -->
+    <polygon points="30,92 128,136 128,142 30,98" fill="#1e1b4b" />
+    <polygon points="226,92 128,136 128,142 226,98" fill="#172554" />
+
+    <!-- 中心金色纽扣 (Tassel Button) -->
+    <ellipse cx="128" cy="92" rx="10" ry="6" fill="url(#tassel-gold)" />
+
+    <!-- 金色流苏 (Tassel) -->
+    <path d="M 128 92 Q 170 94 186 124 L 186 164" fill="none" stroke="url(#tassel-gold)" stroke-width="5" stroke-linecap="round" />
+    <!-- 流苏垂坠穗子 -->
+    <rect x="180" y="156" width="12" height="24" rx="4" fill="url(#tassel-gold)" />
+
+    <!-- 顶部科技 AI 微光火花 -->
+    <circle cx="218" cy="60" r="4" fill="#38bdf8" />
+    <path d="M 218 50 Q 218 60 208 60 Q 218 60 218 70 Q 218 60 228 60 Q 218 60 218 50 Z" fill="#38bdf8" />
+  </g>
+</svg>

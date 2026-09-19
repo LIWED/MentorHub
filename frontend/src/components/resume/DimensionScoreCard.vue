@@ -1,35 +1,46 @@
 <template>
-  <el-card class="dimension-card">
+  <div class="nm-card dimension-card">
     <div class="dim-header">
       <span class="dim-name">{{ dimension }}</span>
-      <div class="dim-score">
-        <span class="score-val">{{ score }}</span>
+      <div class="dim-score-box">
+        <span class="score-val" :class="scoreClass">{{ score }}</span>
         <span class="score-max">/100</span>
       </div>
     </div>
-    <el-progress
-      :percentage="score"
-      :color="progressColor"
-      :stroke-width="8"
-      :show-text="false"
-      style="margin: 8px 0"
-    />
-    <div class="dim-weight">权重 {{ (weight * 100).toFixed(0) }}%</div>
 
-    <div v-if="issues.length" class="issue-list">
-      <div v-for="(issue, i) in issues" :key="i" class="issue-item">
-        <el-icon color="#ff4d4f"><Warning /></el-icon>
-        <span>{{ issue }}</span>
+    <!-- 拟物凹槽进度条 -->
+    <div class="nm-progress-track">
+      <div
+        class="nm-progress-fill"
+        :class="scoreClass"
+        :style="{ width: `${Math.min(100, Math.max(0, score))}%` }"
+      />
+    </div>
+
+    <div class="dim-weight-row">
+      <span class="weight-chip">评估权重 {{ (weight * 100).toFixed(0) }}%</span>
+    </div>
+
+    <!-- 待解决问题 -->
+    <div v-if="issues.length" class="feedback-group issues">
+      <div v-for="(issue, i) in issues" :key="i" class="feedback-item">
+        <div class="item-icon issue-icon">
+          <el-icon><Warning /></el-icon>
+        </div>
+        <span class="item-text">{{ issue }}</span>
       </div>
     </div>
 
-    <div v-if="suggestions.length" class="suggestion-list">
-      <div v-for="(s, i) in suggestions" :key="i" class="suggestion-item">
-        <el-icon color="#52c41a"><CircleCheck /></el-icon>
-        <span>{{ s }}</span>
+    <!-- 改进建议 -->
+    <div v-if="suggestions.length" class="feedback-group suggestions">
+      <div v-for="(s, i) in suggestions" :key="i" class="feedback-item">
+        <div class="item-icon suggest-icon">
+          <el-icon><CircleCheck /></el-icon>
+        </div>
+        <span class="item-text">{{ s }}</span>
       </div>
     </div>
-  </el-card>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -44,32 +55,131 @@ const props = defineProps<{
   suggestions: string[]
 }>()
 
-const progressColor = computed(() => {
-  if (props.score >= 80) return '#52c41a'
-  if (props.score >= 60) return '#faad14'
-  return '#ff4d4f'
+const scoreClass = computed(() => {
+  if (props.score >= 80) return 'high'
+  if (props.score >= 60) return 'medium'
+  return 'low'
 })
 </script>
 
 <style scoped>
-.dimension-card { height: 100%; }
+.dimension-card {
+  padding: 20px;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
 .dim-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: baseline;
+  margin-bottom: 12px;
 }
-.dim-name { font-weight: 500; font-size: 14px; }
-.dim-score { display: flex; align-items: baseline; gap: 2px; }
-.score-val { font-size: 22px; font-weight: 700; color: #1677ff; }
-.score-max { font-size: 13px; color: #8c8c8c; }
-.dim-weight { font-size: 12px; color: #8c8c8c; margin-bottom: 8px; }
-.issue-list, .suggestion-list { margin-top: 8px; }
-.issue-item, .suggestion-item {
+
+.dim-name {
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--nm-text-primary);
+}
+
+.dim-score-box {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.score-val {
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.score-val.high { color: var(--nm-success); }
+.score-val.medium { color: var(--nm-warning); }
+.score-val.low { color: var(--nm-danger); }
+
+.score-max {
+  font-size: 12px;
+  color: var(--nm-text-light);
+}
+
+/* 拟物凹槽进度条 */
+.nm-progress-track {
+  height: 8px;
+  background: var(--nm-bg);
+  border-radius: var(--nm-radius-full);
+  box-shadow: var(--nm-shadow-inset);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.nm-progress-fill {
+  height: 100%;
+  border-radius: var(--nm-radius-full);
+  transition: width 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.nm-progress-fill.high {
+  background: var(--nm-success-gradient);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.nm-progress-fill.medium {
+  background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+}
+
+.nm-progress-fill.low {
+  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+.dim-weight-row {
+  margin-bottom: 12px;
+}
+
+.weight-chip {
+  font-size: 11px;
+  color: var(--nm-text-light);
+  background: rgba(255, 255, 255, 0.6);
+  padding: 2px 7px;
+  border-radius: 4px;
+  box-shadow: inset 1px 1px 2px rgba(166, 180, 200, 0.25);
+}
+
+.feedback-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.feedback-item {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  font-size: 13px;
-  line-height: 1.5;
-  margin-bottom: 4px;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--nm-text-regular);
+}
+
+.item-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.issue-icon {
+  color: var(--nm-danger);
+}
+
+.suggest-icon {
+  color: var(--nm-success);
+}
+
+.item-text {
+  flex: 1;
 }
 </style>

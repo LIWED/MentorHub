@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- 软拟物卡片外框阴影 -->
+    <filter id="nm-shadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="12" dy="16" stdDeviation="16" flood-color="#c9b2cc" flood-opacity="0.45" />
+      <feDropShadow dx="-10" dy="-10" stdDeviation="14" flood-color="#ffffff" flood-opacity="0.9" />
+    </filter>
+    <!-- 3D 拟物立体阴影 -->
+    <filter id="clay-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="8" dy="12" stdDeviation="10" flood-color="#8a4d7a" flood-opacity="0.35" />
+    </filter>
+    <filter id="soft-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- 渐变定义 -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff0f5" />
+      <stop offset="100%" stop-color="#fed7e2" />
+    </linearGradient>
+
+    <linearGradient id="squircle-plate" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fdf2f8" />
+      <stop offset="100%" stop-color="#fbcfe8" />
+    </linearGradient>
+
+    <linearGradient id="mic-body" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f472b6" />
+      <stop offset="50%" stop-color="#db2777" />
+      <stop offset="100%" stop-color="#9d174d" />
+    </linearGradient>
+
+    <linearGradient id="mic-grid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc" />
+      <stop offset="60%" stop-color="#e2e8f0" />
+      <stop offset="100%" stop-color="#94a3b8" />
+    </linearGradient>
+
+    <linearGradient id="ring-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="50%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#b45309" />
+    </linearGradient>
+
+    <linearGradient id="wave-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+  </defs>
+
+  <!-- 背景软拟物底板 (Squircle) -->
+  <rect x="36" y="36" width="440" height="440" rx="96" ry="96" fill="url(#squircle-plate)" filter="url(#nm-shadow)" />
+
+  <!-- 顶部音波与发光圆环 -->
+  <g filter="url(#soft-glow)" opacity="0.85">
+    <circle cx="256" cy="180" r="140" fill="none" stroke="url(#wave-cyan)" stroke-width="6" stroke-dasharray="16 22" opacity="0.4" />
+    <circle cx="256" cy="180" r="110" fill="none" stroke="url(#wave-cyan)" stroke-width="7" stroke-dasharray="24 16" opacity="0.6" />
+  </g>
+
+  <!-- 麦克风 3D 底座与支架 -->
+  <g filter="url(#clay-shadow)">
+    <!-- 椭圆底座 -->
+    <ellipse cx="256" cy="400" rx="90" ry="24" fill="#64748b" />
+    <ellipse cx="256" cy="394" rx="84" ry="20" fill="#94a3b8" />
+    <ellipse cx="256" cy="388" rx="60" ry="14" fill="#cbd5e1" />
+
+    <!-- 垂直金属支柱 -->
+    <rect x="244" y="270" width="24" height="120" rx="12" fill="url(#mic-grid)" />
+
+    <!-- U 型金属半环支架 -->
+    <path d="M 180 220 C 180 320, 332 320, 332 220" fill="none" stroke="url(#mic-grid)" stroke-width="20" stroke-linecap="round" />
+  </g>
+
+  <!-- 麦克风 3D 胶囊主体 -->
+  <g filter="url(#clay-shadow)">
+    <!-- 下半部主体外壳 -->
+    <rect x="206" y="180" width="100" height="96" rx="36" fill="url(#mic-body)" />
+    
+    <!-- 装饰金环 -->
+    <rect x="204" y="172" width="104" height="14" rx="7" fill="url(#ring-gold)" />
+
+    <!-- 上半部金属网格球头 -->
+    <rect x="206" y="90" width="100" height="90" rx="50" fill="url(#mic-grid)" />
+    <!-- 金属网格立体反光 -->
+    <path d="M 226 100 Q 256 120 286 100" fill="none" stroke="#ffffff" stroke-width="4" opacity="0.7" />
+    <line x1="220" y1="135" x2="292" y2="135" stroke="#94a3b8" stroke-width="3" opacity="0.6" />
+    <line x1="230" y1="155" x2="282" y2="155" stroke="#94a3b8" stroke-width="3" opacity="0.6" />
+    
+    <!-- 高光斑 (Gloss Highlight) -->
+    <ellipse cx="230" cy="120" rx="10" ry="18" transform="rotate(-25 230 120)" fill="#ffffff" opacity="0.65" />
+    <ellipse cx="232" cy="210" rx="6" ry="24" transform="rotate(-15 232 210)" fill="#ffffff" opacity="0.4" />
+  </g>
+
+  <!-- 灵动音符与火花 -->
+  <g filter="url(#soft-glow)">
+    <path d="M 360 120 Q 375 105 385 110 T 390 135" fill="none" stroke="#ec4899" stroke-width="6" stroke-linecap="round" />
+    <circle cx="370" cy="140" r="10" fill="#ec4899" />
+
+    <!-- 闪烁星芒 -->
+    <path d="M 140 130 Q 140 145 125 145 Q 140 145 140 160 Q 140 145 155 145 Q 140 145 140 130 Z" fill="#38bdf8" />
+  </g>
+</svg>

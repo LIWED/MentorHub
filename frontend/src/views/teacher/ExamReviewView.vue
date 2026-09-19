@@ -1,66 +1,115 @@
 <template>
-  <div class="exam-review">
-    <el-card>
-      <template #header>
-        <span>待确认批改列表</span>
-        <el-button style="float: right" :icon="Refresh" circle size="small" @click="fetchList" />
-      </template>
+  <div class="exam-review-page">
+    <div class="nm-card review-list-card">
+      <div class="card-header">
+        <div class="header-icon-box">
+          <span class="header-icon">✍️</span>
+        </div>
+        <div style="flex: 1">
+          <h3 class="card-title">待确认批改试卷列表</h3>
+          <p class="card-subtitle">AI 预批改后标记需教师复核确认的试卷档案</p>
+        </div>
+        <button class="nm-icon-refresh-btn" title="刷新列表" @click="fetchList">
+          <el-icon><Refresh /></el-icon>
+        </button>
+      </div>
 
-      <el-table :data="list" v-loading="loading" size="default">
-        <el-table-column prop="student_name" label="学员" width="120" />
-        <el-table-column prop="exam_title" label="试卷" />
-        <el-table-column prop="submitted_at" label="提交时间" width="180" />
-        <el-table-column label="AI 预评分" width="120">
+      <div v-if="!list.length && !loading" class="empty-list">
+        <el-empty description="当前暂无待确认的批改试卷" />
+      </div>
+
+      <el-table v-else :data="list" v-loading="loading" size="default" class="review-table">
+        <el-table-column prop="student_name" label="学员姓名" width="130">
           <template #default="{ row }">
-            {{ row.pre_review?.total_score }} / {{ row.pre_review?.full_score }}
+            <span class="student-name-text">👤 {{ row.student_name }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="待确认题数" width="100">
+        <el-table-column prop="exam_title" label="试卷名称" min-width="180">
           <template #default="{ row }">
-            <el-tag type="warning" size="small">{{ row.pre_review?.needs_review_count }}</el-tag>
+            <span class="exam-title-text">{{ row.exam_title }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100">
+        <el-table-column prop="submitted_at" label="提交时间" width="180">
           <template #default="{ row }">
-            <el-button type="primary" text size="small" @click="openReview(row.submission_id)">
-              审阅
-            </el-button>
+            <span class="time-text">{{ row.submitted_at }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="AI 预评分" width="130">
+          <template #default="{ row }">
+            <span class="score-pill">
+              {{ row.pre_review?.total_score }} / {{ row.pre_review?.full_score }} 分
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="待确认题数" width="120" align="center">
+          <template #default="{ row }">
+            <span class="needs-review-chip">
+              {{ row.pre_review?.needs_review_count }} 题待审
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="110" align="center">
+          <template #default="{ row }">
+            <button
+              class="table-review-btn"
+              type="button"
+              @click="openReview(row.submission_id)"
+            >
+              审阅批改
+            </button>
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </div>
 
     <!-- 审阅抽屉 -->
-    <el-drawer v-model="drawerVisible" title="批改确认" size="65%" direction="rtl" destroy-on-close>
-      <div v-if="currentReview" class="review-drawer">
+    <el-drawer
+      v-model="drawerVisible"
+      title="教师批改复核与确认"
+      size="65%"
+      direction="rtl"
+      destroy-on-close
+      class="nm-drawer"
+    >
+      <div v-if="currentReview" class="review-drawer-content">
+        <!-- 汇总信息卡片 -->
+        <div class="nm-card drawer-summary-card">
+          <div class="summary-grid">
+            <div class="summary-item">
+              <span class="sum-label">AI 预评分</span>
+              <div class="sum-val">
+                <b>{{ currentReview.pre_review_summary?.total_score }}</b>
+                <span class="sum-max">/ {{ currentReview.pre_review_summary?.full_score }} 分</span>
+              </div>
+            </div>
 
-        <!-- 汇总信息 -->
-        <el-descriptions :column="3" border size="small" style="margin-bottom: 16px">
-          <el-descriptions-item label="AI 预评分">
-            <b>{{ currentReview.pre_review_summary?.total_score }}</b>
-            / {{ currentReview.pre_review_summary?.full_score }} 分
-          </el-descriptions-item>
-          <el-descriptions-item label="待确认题数">
-            <el-tag type="warning" size="small">
-              {{ currentReview.pre_review_summary?.by_question?.filter(q => q.needs_review).length }} 题
-            </el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="知识薄弱点">
-            <span v-if="!currentReview.weak_points?.length" style="color:#999">—</span>
-            <el-tag
-              v-for="wp in currentReview.weak_points?.slice(0, 3)"
-              :key="wp.tag"
-              type="danger"
-              size="small"
-              style="margin-right: 4px"
-            >
-              {{ wp.tag }}
-            </el-tag>
-          </el-descriptions-item>
-        </el-descriptions>
+            <div class="summary-item">
+              <span class="sum-label">待确认题目</span>
+              <div class="sum-val">
+                <span class="needs-count-tag">
+                  {{ currentReview.pre_review_summary?.by_question?.filter(q => q.needs_review).length }} 题需确认
+                </span>
+              </div>
+            </div>
+
+            <div class="summary-item">
+              <span class="sum-label">薄弱知识点</span>
+              <div class="sum-val">
+                <span v-if="!currentReview.weak_points?.length" style="color: #94a3b8">暂无</span>
+                <span
+                  v-for="wp in currentReview.weak_points?.slice(0, 3)"
+                  :key="wp.tag"
+                  class="drawer-weak-chip"
+                >
+                  {{ wp.tag }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <!-- 逐题列表 -->
-        <el-collapse v-model="expandedKeys">
+        <el-collapse v-model="expandedKeys" class="nm-collapse">
           <el-collapse-item
             v-for="q in currentReview.pre_review_summary?.by_question"
             :key="q.question_id"
@@ -69,33 +118,36 @@
             <template #title>
               <div class="q-title-row">
                 <span class="q-no">第 {{ q.question_no }} 题</span>
-                <el-tag :type="typeTagType(q.question_type)" size="small" style="margin-left: 6px">
+                <span class="type-tag" :class="q.question_type">
                   {{ typeLabel(q.question_type) }}
-                </el-tag>
-                <el-tag
-                  :type="scoreChanged(q) ? 'danger' : (q.needs_review ? 'warning' : 'success')"
-                  size="small"
-                  style="margin-left: 6px"
+                </span>
+                <span
+                  class="score-tag"
+                  :class="{
+                    'changed': scoreChanged(q),
+                    'needs-review': q.needs_review && !scoreChanged(q),
+                    'normal': !q.needs_review && !scoreChanged(q)
+                  }"
                 >
                   {{ scoreChanged(q) ? '已改分 ' + modifications[q.question_id]?.new_score : q.score }}
                   / {{ q.full_score }} 分
-                  <span v-if="q.needs_review && !scoreChanged(q)">· 需确认</span>
-                </el-tag>
+                  <span v-if="q.needs_review && !scoreChanged(q)">· 需核准</span>
+                </span>
               </div>
             </template>
 
             <div class="q-detail">
               <!-- 题目内容 -->
               <div v-if="q.content" class="q-section">
-                <div class="q-label">题目</div>
+                <div class="q-label">题目描述</div>
                 <div class="q-content">{{ q.content }}</div>
               </div>
 
               <!-- 学员答案 & 参考答案 -->
               <div class="q-row">
                 <div class="q-col">
-                  <div class="q-label">学员答案</div>
-                  <div class="q-answer">{{ q.student_answer || '（未作答）' }}</div>
+                  <div class="q-label">学员作答</div>
+                  <div class="q-answer student">{{ q.student_answer || '（未作答）' }}</div>
                 </div>
                 <div v-if="q.correct_answer" class="q-col">
                   <div class="q-label">参考答案</div>
@@ -105,63 +157,68 @@
 
               <!-- AI 反馈 -->
               <div class="q-section">
-                <div class="q-label">AI 批改反馈</div>
+                <div class="q-label">AI 批改结论</div>
                 <div class="q-feedback">{{ q.ai_feedback }}</div>
               </div>
 
               <!-- 得分点（简答题） -->
               <div v-if="q.point_results?.length" class="q-section">
-                <div class="q-label">得分点明细</div>
+                <div class="q-label">得分点核算明细</div>
                 <div v-for="(pt, i) in q.point_results" :key="i" class="point-row">
-                  <el-icon :color="pt.earned ? '#67c23a' : '#f56c6c'">
+                  <el-icon :color="pt.earned ? '#10b981' : '#ef4444'">
                     <component :is="pt.earned ? 'CircleCheck' : 'CircleClose'" />
                   </el-icon>
-                  <span style="margin-left: 4px">{{ pt.point_desc }}（{{ pt.point_score }}分）</span>
-                  <span v-if="!pt.earned && pt.missing" style="color:#f56c6c; margin-left: 4px">— {{ pt.missing }}</span>
+                  <span style="margin-left: 6px; font-weight: 500">{{ pt.point_desc }}（{{ pt.point_score }}分）</span>
+                  <span v-if="!pt.earned && pt.missing" style="color:#ef4444; margin-left: 6px">
+                    — {{ pt.missing }}
+                  </span>
                 </div>
               </div>
 
               <!-- 代码题：测试用例 -->
               <div v-if="q.question_type === 'code'" class="q-section">
-                <div class="q-label">测试用例</div>
-                <span v-if="q.sandbox_skipped" style="color:#909399">Judge0 沙箱跳过</span>
-                <span v-else>通过 {{ q.test_cases_passed }} / {{ q.test_cases_total }}</span>
+                <div class="q-label">代码测试用例</div>
+                <span v-if="q.sandbox_skipped" style="color:#94a3b8; font-size: 13px">Judge0 沙箱跳过</span>
+                <span v-else class="test-pass-text">通过 {{ q.test_cases_passed }} / {{ q.test_cases_total }} 测试用例</span>
               </div>
 
               <!-- 教师改分区 -->
               <div class="q-modify-row">
-                <span class="q-label" style="min-width: 64px">教师改分</span>
+                <span class="modify-label">教师复核改分：</span>
                 <el-input-number
                   v-model="modifications[q.question_id].new_score"
                   :min="0"
                   :max="q.full_score"
-                  size="small"
-                  style="width: 110px"
+                  size="default"
+                  style="width: 120px"
                   @change="onScoreChange(q)"
                 />
-                <span style="font-size:12px; color:#909399; margin: 0 4px">/ {{ q.full_score }}</span>
+                <span class="max-score-hint">/ {{ q.full_score }} 分</span>
                 <el-input
                   v-model="modifications[q.question_id].comment"
-                  placeholder="教师批注（可选）"
-                  size="small"
-                  style="flex: 1; min-width: 180px; max-width: 320px"
+                  placeholder="填写教师批注意见（可选）"
+                  size="default"
+                  style="flex: 1; min-width: 200px"
                 />
               </div>
             </div>
           </el-collapse-item>
         </el-collapse>
 
-        <!-- 操作栏 -->
+        <!-- 底部确认发布操作栏 -->
         <div class="action-bar">
-          <div style="font-size:13px; color:#606266">
-            <span v-if="changedCount === 0">AI 批改结果未做修改，点击确认直接发布。</span>
-            <span v-else>已修改 <b>{{ changedCount }}</b> 题分数，确认后以修改值为准发布。</span>
+          <div class="action-hint">
+            <span v-if="changedCount === 0">AI 批改结论未作变更，确认后将按原预评分发布给学员。</span>
+            <span v-else>已调整 <b>{{ changedCount }}</b> 题分数，确认后将以教师调整分数为准正式发布。</span>
           </div>
-          <div style="display:flex; gap:10px; margin-top:10px">
-            <el-button @click="drawerVisible = false" :disabled="confirming">取消</el-button>
-            <el-button type="primary" :loading="confirming" @click="confirmReview">
-              {{ changedCount > 0 ? '修改后确认发布' : '确认发布' }}
-            </el-button>
+          <div class="action-btns">
+            <button class="nm-button cancel-btn" @click="drawerVisible = false" :disabled="confirming">
+              取消
+            </button>
+            <button class="nm-button-primary confirm-publish-btn" :disabled="confirming" @click="confirmReview">
+              <span v-if="confirming" class="btn-spinner" />
+              <span v-else>{{ changedCount > 0 ? '修改后确认发布' : '直接确认发布' }}</span>
+            </button>
           </div>
         </div>
       </div>
@@ -172,7 +229,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, CircleCheck, CircleClose } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import { examApi, type PendingReviewItem, type ReviewDetail } from '@/api/exam'
 
 const loading = ref(false)
@@ -182,10 +239,9 @@ const currentReview = ref<ReviewDetail | null>(null)
 const confirming = ref(false)
 const expandedKeys = ref<string[]>([])
 
-// 每题：{ new_score, comment }，初始化为 AI 分数
+// 每题：{ new_score, comment }
 const modifications = reactive<Record<string, { new_score: number; comment: string }>>({})
 
-// 计算被修改的题目数（和 AI 分数不同的）
 const changedCount = computed(() => {
   if (!currentReview.value) return 0
   return currentReview.value.pre_review_summary.by_question.filter(q => scoreChanged(q)).length
@@ -196,8 +252,8 @@ function scoreChanged(q: { question_id: string; score: number }) {
   return mod !== undefined && mod.new_score !== q.score
 }
 
-function onScoreChange(q: { question_id: string; score: number }) {
-  // 触发 changedCount 重计算（reactive 已自动处理，此处留作扩展点）
+function onScoreChange(_q: { question_id: string; score: number }) {
+  // reactive handles updates
 }
 
 function typeLabel(type: string) {
@@ -209,17 +265,6 @@ function typeLabel(type: string) {
     code:          '代码',
   }
   return map[type] ?? type
-}
-
-function typeTagType(type: string) {
-  const map: Record<string, string> = {
-    single_choice: '',
-    multi_choice:  '',
-    judge:         '',
-    short_answer:  'warning',
-    code:          'danger',
-  }
-  return (map[type] ?? '') as '' | 'success' | 'warning' | 'danger' | 'info'
 }
 
 async function fetchList() {
@@ -236,12 +281,10 @@ async function openReview(submissionId: string) {
   const { data } = await examApi.getSubmissionReviewTeacher(submissionId)
   currentReview.value = data
 
-  // 初始化改分表：默认使用 AI 分数
   for (const q of data.pre_review_summary?.by_question ?? []) {
     modifications[q.question_id] = { new_score: q.score, comment: '' }
   }
 
-  // 自动展开需要确认的题目
   expandedKeys.value = (data.pre_review_summary?.by_question ?? [])
     .filter(q => q.needs_review)
     .map(q => q.question_id)
@@ -255,7 +298,6 @@ async function confirmReview() {
   try {
     const questions = currentReview.value.pre_review_summary.by_question ?? []
 
-    // 只提交实际改动的题目
     const changedMods = questions
       .filter(q => scoreChanged(q))
       .map(q => ({
@@ -271,7 +313,7 @@ async function confirmReview() {
       modifications: changedMods,
     })
 
-    ElMessage.success('批改结果已发布')
+    ElMessage.success('批改结果已成功发布给学员')
     drawerVisible.value = false
     fetchList()
   } catch (e: any) {
@@ -285,88 +327,348 @@ onMounted(fetchList)
 </script>
 
 <style scoped>
-.exam-review { max-width: 1100px; }
+.exam-review-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  animation: pop-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.review-list-card {
+  padding: 24px 28px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.4);
+}
+
+.header-icon-box {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--nm-radius-md);
+  background: var(--nm-bg);
+  box-shadow: var(--nm-shadow-sm);
+  border: var(--nm-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.header-icon {
+  font-size: 22px;
+}
+
+.card-title {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--nm-text-primary);
+}
+
+.card-subtitle {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--nm-text-secondary);
+}
+
+.nm-icon-refresh-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--nm-radius-sm);
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  box-shadow: var(--nm-shadow-sm);
+  color: var(--nm-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--nm-transition);
+}
+
+.nm-icon-refresh-btn:hover {
+  transform: rotate(180deg);
+  color: var(--nm-primary);
+  box-shadow: var(--nm-shadow-hover);
+}
+
+.student-name-text {
+  font-weight: 600;
+  color: var(--nm-text-primary);
+}
+
+.exam-title-text {
+  font-weight: 500;
+  color: var(--nm-text-primary);
+}
+
+.time-text {
+  font-size: 12.5px;
+  color: var(--nm-text-secondary);
+}
+
+.score-pill {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--nm-primary);
+  background: #eff6ff;
+  padding: 2px 8px;
+  border-radius: var(--nm-radius-full);
+}
+
+.needs-review-chip {
+  font-size: 11px;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 2px 8px;
+  border-radius: var(--nm-radius-full);
+  font-weight: 600;
+}
+
+.table-review-btn {
+  padding: 4px 14px;
+  border-radius: var(--nm-radius-full);
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  box-shadow: var(--nm-shadow-sm);
+  color: var(--nm-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--nm-transition);
+}
+
+.table-review-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--nm-shadow-hover);
+}
+
+/* 审阅抽屉内容 */
+.review-drawer-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 4px;
+}
+
+.drawer-summary-card {
+  padding: 16px 20px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sum-label {
+  font-size: 11.5px;
+  color: var(--nm-text-light);
+  font-weight: 600;
+}
+
+.sum-val {
+  font-size: 14px;
+  color: var(--nm-text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.sum-max {
+  font-size: 12px;
+  color: var(--nm-text-light);
+}
+
+.needs-count-tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 2px 8px;
+  border-radius: var(--nm-radius-full);
+}
+
+.drawer-weak-chip {
+  font-size: 11px;
+  color: #dc2626;
+  background: #fee2e2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-right: 4px;
+}
 
 .q-title-row {
   display: flex;
   align-items: center;
-  gap: 0;
-}
-.q-no { font-weight: 600; }
-
-.q-detail {
-  padding: 4px 0 8px 0;
-  font-size: 14px;
-  line-height: 1.8;
-  display: flex;
-  flex-direction: column;
   gap: 10px;
 }
 
-.q-section { display: flex; flex-direction: column; gap: 2px; }
+.q-no {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: var(--nm-text-primary);
+}
+
+.type-tag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--nm-text-secondary);
+}
+
+.score-tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: var(--nm-radius-full);
+  font-weight: 600;
+}
+
+.score-tag.normal { background: #dcfce7; color: #059669; }
+.score-tag.needs-review { background: #fef3c7; color: #d97706; }
+.score-tag.changed { background: #fee2e2; color: #dc2626; }
+
+.q-detail {
+  background: var(--nm-bg);
+  border-radius: var(--nm-radius-md);
+  box-shadow: var(--nm-shadow-inset);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.q-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 .q-row {
-  display: flex;
-  gap: 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
 }
-.q-col { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+
+.q-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 .q-label {
-  font-size: 12px;
-  color: #909399;
+  font-size: 11.5px;
+  color: var(--nm-text-light);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
-.q-content {
-  background: #f5f7fa;
-  border-radius: 4px;
-  padding: 6px 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
+.q-content, .q-answer {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: var(--nm-radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.q-answer {
-  background: #f5f7fa;
-  border-radius: 4px;
-  padding: 6px 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  min-height: 32px;
-}
 .q-answer.correct {
-  background: #f0f9eb;
-  color: #529b2e;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #059669;
 }
 
 .q-feedback {
-  color: #606266;
-  padding: 4px 0;
-  white-space: pre-wrap;
+  font-size: 13px;
+  color: var(--nm-text-regular);
+  line-height: 1.6;
 }
 
 .point-row {
   display: flex;
   align-items: center;
-  font-size: 13px;
+  font-size: 12.5px;
   padding: 2px 0;
+}
+
+.test-pass-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--nm-success);
 }
 
 .q-modify-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
-  padding: 8px 10px;
-  background: #fafafa;
-  border-radius: 4px;
-  border: 1px solid #e4e7ed;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: var(--nm-radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+}
+
+.modify-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--nm-text-primary);
+}
+
+.max-score-hint {
+  font-size: 12px;
+  color: var(--nm-text-light);
 }
 
 .action-bar {
-  margin-top: 24px;
+  margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid #e4e7ed;
+  border-top: 1px solid rgba(203, 213, 225, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
 }
+
+.action-hint {
+  font-size: 12.5px;
+  color: var(--nm-text-secondary);
+}
+
+.action-btns {
+  display: flex;
+  gap: 10px;
+}
+
+.cancel-btn {
+  padding: 8px 18px;
+}
+
+.confirm-publish-btn {
+  padding: 8px 20px;
+  font-size: 13.5px;
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>

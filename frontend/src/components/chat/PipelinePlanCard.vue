@@ -2,9 +2,11 @@
   <div class="pipeline-card">
     <!-- 标题栏 -->
     <div class="pipeline-header">
-      <el-icon class="pipeline-icon"><Share /></el-icon>
+      <div class="pipeline-icon-box">
+        <el-icon><Share /></el-icon>
+      </div>
       <span class="pipeline-title">{{ title }}</span>
-      <el-tag type="warning" size="small" class="pipeline-tag">多 Agent 协同</el-tag>
+      <span class="pipeline-badge">多 Agent 协同流</span>
     </div>
 
     <!-- 简介 -->
@@ -18,10 +20,11 @@
         class="step-wrapper"
       >
         <!-- 步骤卡片 -->
-        <div class="step-card">
+        <div class="step-card" @click="router.push(step.action_url)">
           <div class="step-left">
             <div class="step-badge" :class="`step-badge--${step.agent_type}`">
-              {{ agentIcon[step.agent_type] ?? '🤖' }}
+              <img v-if="agentIcon[step.agent_type]" :src="agentIcon[step.agent_type]" class="step-icon-img" :alt="step.label" />
+              <span v-else>🤖</span>
             </div>
             <div class="step-info">
               <div class="step-label">
@@ -31,24 +34,22 @@
               <div class="step-desc">{{ step.desc }}</div>
               <div class="step-tip">
                 <el-icon><InfoFilled /></el-icon>
-                {{ step.tip }}
+                <span>{{ step.tip }}</span>
               </div>
             </div>
           </div>
-          <el-button
-            type="primary"
-            :plain="step.step > 1"
-            size="small"
-            class="step-btn"
-            @click="router.push(step.action_url)"
-          >
-            {{ step.action_label }} →
-          </el-button>
+          <button class="step-action-btn" type="button">
+            <span>{{ step.action_label }}</span>
+            <el-icon><ArrowRight /></el-icon>
+          </button>
         </div>
 
-        <!-- 步骤间箭头（最后一步不显示） -->
-        <div v-if="index < steps.length - 1" class="step-arrow">
-          <el-icon><ArrowDown /></el-icon>
+        <!-- 步骤间连接箭头 -->
+        <div v-if="index < steps.length - 1" class="step-connector">
+          <div class="connector-line" />
+          <div class="connector-dot">
+            <el-icon><ArrowDown /></el-icon>
+          </div>
         </div>
       </div>
     </div>
@@ -57,7 +58,11 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
-import { Share, InfoFilled, ArrowDown } from '@element-plus/icons-vue'
+import { Share, InfoFilled, ArrowDown, ArrowRight } from '@element-plus/icons-vue'
+import iconQa from '@/assets/images/icon_qa.jpg'
+import iconExam from '@/assets/images/icon_exam.jpg'
+import iconResume from '@/assets/images/icon_resume.jpg'
+import iconInterview from '@/assets/images/icon_interview.svg'
 
 defineProps<{
   title: string
@@ -76,50 +81,65 @@ defineProps<{
 const router = useRouter()
 
 const agentIcon: Record<string, string> = {
-  resume:    '📄',
-  interview: '🎤',
-  exam:      '📝',
-  qa:        '🤖',
+  resume:    iconResume,
+  interview: iconInterview,
+  exam:      iconExam,
+  qa:        iconQa,
 }
 </script>
 
 <style scoped>
 .pipeline-card {
-  background: linear-gradient(135deg, #fffbe6 0%, #fff7e6 100%);
-  border: 1px solid #ffd666;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 4px;
-  font-size: 13px;
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  border-radius: var(--nm-radius-lg);
+  box-shadow: var(--nm-shadow-flat);
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  animation: pop-in 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .pipeline-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-  font-weight: 600;
-  color: #d46b08;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
-.pipeline-icon {
-  font-size: 15px;
+.pipeline-icon-box {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--nm-radius-sm);
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #b45309;
+  box-shadow: var(--nm-shadow-sm);
 }
 
 .pipeline-title {
   flex: 1;
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--nm-text-primary);
 }
 
-.pipeline-tag {
+.pipeline-badge {
   font-size: 11px;
+  font-weight: 600;
+  color: #b45309;
+  background: #fef3c7;
+  padding: 3px 9px;
+  border-radius: var(--nm-radius-full);
+  box-shadow: inset 1px 1px 2px rgba(180, 83, 9, 0.2);
 }
 
 .pipeline-intro {
-  margin: 0 0 12px;
-  color: #595959;
+  margin: 0 0 16px;
+  color: var(--nm-text-regular);
   line-height: 1.6;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .pipeline-steps {
@@ -137,36 +157,57 @@ const agentIcon: Record<string, string> = {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
-  border: 1px solid #ffe58f;
-  border-radius: 6px;
-  padding: 10px 12px;
-  gap: 12px;
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  border-radius: var(--nm-radius-md);
+  box-shadow: var(--nm-shadow-sm);
+  padding: 12px 16px;
+  gap: 14px;
+  cursor: pointer;
+  transition: var(--nm-transition);
+}
+
+.step-card:hover {
+  transform: translateY(-2px) scale(1.008);
+  box-shadow: var(--nm-shadow-hover);
+}
+
+.step-card:hover .step-action-btn {
+  background: var(--nm-primary);
+  color: #ffffff;
+  box-shadow: 0 4px 10px rgba(59, 130, 246, 0.35);
 }
 
 .step-left {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
   flex: 1;
 }
 
 .step-badge {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--nm-radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 20px;
   flex-shrink: 0;
-  background: #fff7e6;
+  box-shadow: 2px 2px 6px rgba(166, 180, 200, 0.3);
 }
 
-.step-badge--resume    { background: #e6f4ff; }
-.step-badge--interview { background: #fff0f6; }
-.step-badge--exam      { background: #f6ffed; }
-.step-badge--qa        { background: #f0f7ff; }
+.step-icon-img {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.step-badge--resume    { background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%); }
+.step-badge--interview { background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%); }
+.step-badge--exam      { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); }
+.step-badge--qa        { background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); }
 
 .step-info {
   display: flex;
@@ -178,26 +219,27 @@ const agentIcon: Record<string, string> = {
 .step-label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .step-num {
   font-size: 11px;
-  color: #8c8c8c;
-  background: #f5f5f5;
-  padding: 1px 5px;
-  border-radius: 3px;
+  font-weight: 700;
+  color: var(--nm-primary);
+  background: rgba(59, 130, 246, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 .step-name {
-  font-weight: 600;
-  color: #262626;
-  font-size: 13px;
+  font-weight: 700;
+  color: var(--nm-text-primary);
+  font-size: 13.5px;
 }
 
 .step-desc {
-  color: #595959;
-  font-size: 12px;
+  color: var(--nm-text-secondary);
+  font-size: 12.5px;
   line-height: 1.5;
 }
 
@@ -205,19 +247,47 @@ const agentIcon: Record<string, string> = {
   display: flex;
   align-items: center;
   gap: 4px;
-  color: #d46b08;
+  color: #b45309;
   font-size: 11.5px;
+  margin-top: 2px;
 }
 
-.step-btn {
+.step-action-btn {
   flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: var(--nm-radius-full);
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  box-shadow: var(--nm-shadow-sm);
+  color: var(--nm-primary);
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: var(--nm-transition);
 }
 
-.step-arrow {
+.step-connector {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   padding: 4px 0;
-  color: #ffa940;
-  font-size: 16px;
+  position: relative;
+}
+
+.connector-line {
+  width: 2px;
+  height: 12px;
+  background: #cbd5e1;
+}
+
+.connector-dot {
+  font-size: 13px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>

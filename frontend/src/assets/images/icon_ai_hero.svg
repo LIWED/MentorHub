@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <filter id="hero-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <radialGradient id="sphere-grad" cx="35%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="25%" stop-color="#93c5fd" />
+      <stop offset="60%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </radialGradient>
+    <linearGradient id="orbit-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+
+  <!-- 3D 浮动全息光环与球体 -->
+  <g filter="url(#hero-glow)">
+    <!-- 倾斜轨道 1 -->
+    <ellipse cx="128" cy="128" rx="96" ry="34" transform="rotate(-30 128 128)" fill="none" stroke="url(#orbit-grad)" stroke-width="5" stroke-dasharray="16 10" opacity="0.8" />
+    <!-- 倾斜轨道 2 -->
+    <ellipse cx="128" cy="128" rx="96" ry="34" transform="rotate(35 128 128)" fill="none" stroke="url(#orbit-grad)" stroke-width="5" stroke-dasharray="20 12" opacity="0.6" />
+
+    <!-- 轨道小行星粒子 -->
+    <circle cx="50" cy="80" r="7" fill="#f43f5e" />
+    <circle cx="210" cy="90" r="8" fill="#38bdf8" />
+    <circle cx="180" cy="190" r="6" fill="#fbbf24" />
+
+    <!-- 中心 3D 核心光球 -->
+    <circle cx="128" cy="128" r="56" fill="url(#sphere-grad)" />
+
+    <!-- 光球顶部半透明高光 -->
+    <ellipse cx="112" cy="104" rx="20" ry="12" transform="rotate(-25 112 104)" fill="#ffffff" opacity="0.75" />
+
+    <!-- 闪耀四角星芒 -->
+    <g transform="translate(190, 45)">
+      <path d="M 0 -18 Q 0 0 -18 0 Q 0 0 0 18 Q 0 0 18 0 Q 0 0 0 -18 Z" fill="#ffffff" />
+    </g>
+    <g transform="translate(48, 175)">
+      <path d="M 0 -12 Q 0 0 -12 0 Q 0 0 0 12 Q 0 0 12 0 Q 0 0 0 -12 Z" fill="#a855f7" />
+    </g>
+  </g>
+</svg>
