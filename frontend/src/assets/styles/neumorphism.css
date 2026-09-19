@@ -1,0 +1,321 @@
+/**
+ * MentorHub - 新拟物 (Neumorphism / Soft UI 2.0) 设计系统
+ * 兼具极致拟物质感、高可用对比度与生动的微交互动效
+ */
+
+:root {
+  /* 基础色彩系统 */
+  --nm-bg: #ebf0f7;
+  --nm-bg-soft: #f2f5f9;
+  --nm-bg-pure: #ffffff;
+  
+  /* 文本高对比度色彩 (符合 WCAG AA/AAA 标准) */
+  --nm-text-primary: #1e293b;
+  --nm-text-regular: #475569;
+  --nm-text-secondary: #64748b;
+  --nm-text-light: #94a3b8;
+  
+  /* 语义品牌色 - 活泼且富有科技感 */
+  --nm-primary: #3b82f6;
+  --nm-primary-hover: #2563eb;
+  --nm-primary-active: #1d4ed8;
+  --nm-primary-gradient: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+  --nm-primary-glow: 0 4px 14px rgba(59, 130, 246, 0.35);
+
+  --nm-success: #10b981;
+  --nm-success-gradient: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  --nm-warning: #f59e0b;
+  --nm-danger: #ef4444;
+  --nm-info: #64748b;
+  --nm-purple: #8b5cf6;
+  --nm-purple-gradient: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+
+  /* 新拟物阴影系统 (Neumorphic Shadows) */
+  --nm-shadow-flat: 6px 6px 14px rgba(166, 180, 200, 0.55), -6px -6px 14px rgba(255, 255, 255, 0.9);
+  --nm-shadow-hover: 8px 8px 20px rgba(166, 180, 200, 0.65), -8px -8px 20px rgba(255, 255, 255, 1);
+  --nm-shadow-sm: 4px 4px 8px rgba(166, 180, 200, 0.5), -4px -4px 8px rgba(255, 255, 255, 0.85);
+  --nm-shadow-inset: inset 3px 3px 6px rgba(166, 180, 200, 0.5), inset -3px -3px 6px rgba(255, 255, 255, 0.9);
+  --nm-shadow-inset-deep: inset 4px 4px 8px rgba(166, 180, 200, 0.65), inset -4px -4px 8px rgba(255, 255, 255, 0.95);
+  --nm-shadow-pressed: inset 2px 2px 5px rgba(166, 180, 200, 0.6), inset -2px -2px 5px rgba(255, 255, 255, 0.85);
+
+  /* 边框发光轮廓 (Soft Outer/Inner Contour) */
+  --nm-border: 1px solid rgba(255, 255, 255, 0.8);
+  --nm-border-subtle: 1px solid rgba(203, 213, 225, 0.4);
+
+  /* 圆角规格 */
+  --nm-radius-sm: 8px;
+  --nm-radius-md: 14px;
+  --nm-radius-lg: 20px;
+  --nm-radius-xl: 28px;
+  --nm-radius-full: 9999px;
+
+  /* 物理弹簧过渡动效 (Spring Timing) */
+  --nm-transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+  --nm-transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 全局基底 */
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--nm-bg);
+  color: var(--nm-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 拟物卡片容器基础类 */
+.nm-card {
+  background: var(--nm-bg);
+  border-radius: var(--nm-radius-md);
+  box-shadow: var(--nm-shadow-flat);
+  border: var(--nm-border);
+  transition: var(--nm-transition);
+}
+
+.nm-card--hoverable:hover {
+  transform: translateY(-3px) scale(1.008);
+  box-shadow: var(--nm-shadow-hover);
+}
+
+/* 拟物凹陷槽基础类 (用于输入框、已选中项、凹槽面板) */
+.nm-inset {
+  background: var(--nm-bg);
+  border-radius: var(--nm-radius-md);
+  box-shadow: var(--nm-shadow-inset);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+/* 拟物按钮基础类 */
+.nm-button {
+  background: var(--nm-bg);
+  border: var(--nm-border);
+  box-shadow: var(--nm-shadow-sm);
+  border-radius: var(--nm-radius-md);
+  color: var(--nm-text-primary);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--nm-transition);
+  user-select: none;
+}
+
+.nm-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--nm-shadow-hover);
+  color: var(--nm-primary);
+}
+
+.nm-button:active {
+  transform: translateY(1px);
+  box-shadow: var(--nm-shadow-pressed);
+}
+
+/* 拟物主操作按钮 (凸起渐变 + 柔光) */
+.nm-button-primary {
+  background: var(--nm-primary-gradient) !important;
+  color: #ffffff !important;
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35), 4px 4px 10px rgba(166, 180, 200, 0.4) !important;
+  border-radius: var(--nm-radius-md);
+  font-weight: 600;
+  transition: var(--nm-transition) !important;
+}
+
+.nm-button-primary:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 6px 18px rgba(59, 130, 246, 0.45), 6px 6px 14px rgba(166, 180, 200, 0.5) !important;
+}
+
+.nm-button-primary:active {
+  transform: translateY(1px) scale(0.98);
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.3) !important;
+}
+
+/* 动效关键帧集 (Keyframes) */
+@keyframes bounce-wave {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-7px);
+  }
+}
+
+@keyframes pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.92) translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes float-gentle {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(59, 130, 246, 0);
+  }
+}
+
+@keyframes icon-wiggle {
+  0% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg) scale(1.1); }
+  75% { transform: rotate(10deg) scale(1.1); }
+  100% { transform: rotate(0deg); }
+}
+
+@keyframes shimmer-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+/* Element Plus 视觉覆盖 - 全面契合新拟物 */
+.el-card {
+  --el-card-border-color: rgba(255, 255, 255, 0.7);
+  --el-card-border-radius: var(--nm-radius-md);
+  --el-card-bg-color: var(--nm-bg);
+  box-shadow: var(--nm-shadow-flat) !important;
+  border: var(--nm-border) !important;
+  transition: var(--nm-transition);
+}
+
+.el-card.is-hover-shadow:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--nm-shadow-hover) !important;
+}
+
+.el-card__header {
+  border-bottom: 1px solid rgba(203, 213, 225, 0.4) !important;
+  padding: 14px 20px !important;
+  font-weight: 600;
+  color: var(--nm-text-primary);
+}
+
+/* 输入框 / 文本框：内陷槽质感 */
+.el-input__wrapper,
+.el-textarea__inner {
+  background-color: var(--nm-bg) !important;
+  box-shadow: var(--nm-shadow-inset) !important;
+  border: 1px solid rgba(255, 255, 255, 0.5) !important;
+  border-radius: var(--nm-radius-md) !important;
+  color: var(--nm-text-primary) !important;
+  transition: var(--nm-transition-smooth);
+}
+
+.el-input__wrapper:hover,
+.el-textarea__inner:hover {
+  box-shadow: inset 3px 3px 7px rgba(166, 180, 200, 0.6), inset -3px -3px 7px rgba(255, 255, 255, 1) !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus {
+  box-shadow: inset 3px 3px 7px rgba(166, 180, 200, 0.6), inset -3px -3px 7px rgba(255, 255, 255, 1), 0 0 0 2px rgba(59, 130, 246, 0.3) !important;
+}
+
+/* 按钮微调 */
+.el-button {
+  border-radius: var(--nm-radius-md);
+  font-weight: 500;
+  transition: var(--nm-transition);
+}
+
+.el-button--default:not(.is-text) {
+  background-color: var(--nm-bg);
+  border: var(--nm-border);
+  box-shadow: var(--nm-shadow-sm);
+  color: var(--nm-text-primary);
+}
+
+.el-button--default:not(.is-text):hover {
+  transform: translateY(-2px);
+  box-shadow: var(--nm-shadow-hover);
+  color: var(--nm-primary);
+  background-color: var(--nm-bg);
+}
+
+.el-button--default:not(.is-text):active {
+  transform: translateY(1px);
+  box-shadow: var(--nm-shadow-pressed);
+}
+
+.el-button--primary:not(.is-plain):not(.is-text) {
+  background: var(--nm-primary-gradient) !important;
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35), 4px 4px 8px rgba(166, 180, 200, 0.3) !important;
+}
+
+.el-button--primary:not(.is-plain):not(.is-text):hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.45), 6px 6px 12px rgba(166, 180, 200, 0.4) !important;
+}
+
+.el-button--primary:not(.is-plain):not(.is-text):active {
+  transform: translateY(1px) scale(0.98);
+}
+
+/* 标签 Tags: 药丸形态 + 柔和内嵌/凸起 */
+.el-tag {
+  border-radius: var(--nm-radius-full) !important;
+  font-weight: 500;
+  box-shadow: 2px 2px 5px rgba(166, 180, 200, 0.3), -2px -2px 5px rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.6) !important;
+}
+
+/* 表格 Table 容器 */
+.el-table {
+  background-color: transparent !important;
+  border-radius: var(--nm-radius-md);
+  overflow: hidden;
+}
+
+.el-table th.el-table__cell {
+  background-color: var(--nm-bg-soft) !important;
+  color: var(--nm-text-secondary) !important;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.4) !important;
+}
+
+.el-table tr {
+  background-color: transparent !important;
+}
+
+.el-table td.el-table__cell {
+  border-bottom: 1px solid rgba(203, 213, 225, 0.3) !important;
+}
+
+.el-table--enable-row-hover .el-table__body tr:hover > td.el-table__cell {
+  background-color: rgba(255, 255, 255, 0.5) !important;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--nm-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: var(--nm-radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <filter id="avatar-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="4" dy="8" stdDeviation="8" flood-color="#94a3b8" flood-opacity="0.4" />
+      <feDropShadow dx="-4" dy="-4" stdDeviation="6" flood-color="#ffffff" flood-opacity="0.8" />
+    </filter>
+    <filter id="eye-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <linearGradient id="robot-head" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="60%" stop-color="#e2e8f0" />
+      <stop offset="100%" stop-color="#cbd5e1" />
+    </linearGradient>
+    <linearGradient id="visor-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <linearGradient id="ear-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+  </defs>
+
+  <g filter="url(#avatar-shadow)">
+    <!-- 头部基底 (Round 3D Clay Head) -->
+    <rect x="38" y="44" width="180" height="160" rx="60" fill="url(#robot-head)" />
+
+    <!-- 侧边可爱耳机/耳饰 -->
+    <rect x="22" y="90" width="20" height="68" rx="10" fill="url(#ear-cyan)" />
+    <rect x="214" y="90" width="20" height="68" rx="10" fill="url(#ear-cyan)" />
+
+    <!-- 黑色高光护目面罩 (Visor) -->
+    <rect x="56" y="80" width="144" height="88" rx="36" fill="url(#visor-bg)" />
+
+    <!-- 护目镜反光高光弧线 -->
+    <path d="M 70 94 Q 128 84 186 94" fill="none" stroke="#ffffff" stroke-width="3" opacity="0.3" stroke-linecap="round" />
+
+    <!-- 萌动发光眼睛 (Glowing Eyes) -->
+    <g filter="url(#eye-glow)">
+      <!-- 左眼弧线笑眼 -->
+      <path d="M 84 126 C 84 114, 108 114, 108 126" fill="none" stroke="#38bdf8" stroke-width="8" stroke-linecap="round" />
+      <!-- 右眼弧线笑眼 -->
+      <path d="M 148 126 C 148 114, 172 114, 172 126" fill="none" stroke="#38bdf8" stroke-width="8" stroke-linecap="round" />
+      
+      <!-- 额头信号灯 -->
+      <circle cx="128" cy="62" r="6" fill="#38bdf8" />
+    </g>
+
+    <!-- 嘴巴笑意 -->
+    <path d="M 116 182 Q 128 192 140 182" fill="none" stroke="#64748b" stroke-width="4" stroke-linecap="round" />
+  </g>
+</svg>

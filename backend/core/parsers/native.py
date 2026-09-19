@@ -6,10 +6,21 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 
 from backend.core.parsers.base import DocumentParser, ParsedDocument
+from backend.core.parsers.markdown_images import (
+    MarkdownImageResolution,
+    MarkdownImageResolver,
+)
 
 
 class MarkdownParser(DocumentParser):
     supported_extensions = frozenset({".md", ".markdown"})
+
+    def __init__(
+        self,
+        *,
+        image_resolver: MarkdownImageResolver | None = None,
+    ):
+        self._image_resolver = image_resolver
 
     def parse(
         self,
@@ -19,6 +30,19 @@ class MarkdownParser(DocumentParser):
     ) -> ParsedDocument:
         path = Path(file_path).resolve()
         docs = TextLoader(str(path), encoding="utf-8").load()
+        image_resolution = MarkdownImageResolution(
+            text=docs[0].page_content if docs else ""
+        )
+
+        if docs and MarkdownImageResolver.contains_images(docs[0].page_content):
+            resolver = self._image_resolver or MarkdownImageResolver()
+            image_resolution = resolver.enrich(
+                docs[0].page_content,
+                path,
+                document_id=document_id,
+            )
+            docs[0].page_content = image_resolution.text
+
         for doc in docs:
             doc.metadata.update(
                 {
@@ -26,13 +50,31 @@ class MarkdownParser(DocumentParser):
                     "source_name": path.stem,
                     "parser": "markdown",
                     "content_format": "markdown",
+                    "image_count": image_resolution.image_count,
+                    "image_enriched_count": image_resolution.enriched_count,
+                    "image_failed_count": image_resolution.failed_count,
+                    "image_low_value_count": image_resolution.low_value_count,
+                    "image_fallback_count": image_resolution.fallback_count,
+                    "image_tier": image_resolution.image_tier,
                 }
             )
+            if image_resolution.asset_dir:
+                doc.metadata["asset_dir"] = str(image_resolution.asset_dir)
+
         return ParsedDocument(
             source_path=path,
             documents=docs,
             parser_name="markdown",
             content_format="markdown",
+            asset_dir=image_resolution.asset_dir,
+            metadata={
+                "image_count": image_resolution.image_count,
+                "image_enriched_count": image_resolution.enriched_count,
+                "image_failed_count": image_resolution.failed_count,
+                "image_low_value_count": image_resolution.low_value_count,
+                "image_fallback_count": image_resolution.fallback_count,
+                "image_tier": image_resolution.image_tier,
+            },
         )
 
 
