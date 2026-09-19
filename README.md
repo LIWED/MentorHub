@@ -348,7 +348,7 @@ FILE_PATH = r"<PDF 或 Markdown 文档路径>"
 COURSE_ID = "<课程 UUID>"
 DOCUMENT_ID = None
 TENANT_ID = "tenant_default"
-USE_CONTEXT = True
+USE_CONTEXT = False
 ```
 
 然后执行：
@@ -357,7 +357,7 @@ USE_CONTEXT = True
 python scripts/build_knowledge_base.py
 ```
 
-当前脚本支持 `.pdf`、`.md`、`.markdown`。`USE_CONTEXT=True` 时会先进行 Contextual RAG 上下文增强，再生成 BGE-M3 Dense 向量；BM25 稀疏权重会基于当前语料重新计算后写入 Milvus。
+当前默认关闭 Contextual RAG，避免为每个 chunk 额外调用 LLM 产生较高成本。需要时可显式设置 `USE_CONTEXT=True` 开启上下文增强；之后再生成 BGE-M3 Dense 向量，并基于当前语料重建 BM25 稀疏权重后写入 Milvus。
 
 ### 7. 启动后端
 

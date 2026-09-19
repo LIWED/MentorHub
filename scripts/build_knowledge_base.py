@@ -338,7 +338,7 @@ async def build_pipeline(
     document_id: str,
     tenant_id:   str = "tenant_default",
     version:     str = "1.0",
-    use_context: bool = True,
+    use_context: bool = False,
 ) -> None:
     """
     知识库建库完整流水线（五步）：
@@ -399,7 +399,7 @@ if __name__ == '__main__':
     DOCUMENT_ID = None  # None = 自动生成；更新同一文档时填入上次输出的 ID
     TENANT_ID = "tenant_default"
     VERSION = "1.0"
-    USE_CONTEXT = True  # False = 跳过 Contextual RAG（快速调试，不消耗 API 配额）
+    USE_CONTEXT = False  # 默认关闭，避免为每个 chunk 调用 LLM 产生较高成本
 
     doc_id = DOCUMENT_ID or str(uuid.uuid4())
 
