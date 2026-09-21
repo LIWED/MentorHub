@@ -52,17 +52,27 @@
   /* 物理弹簧过渡动效 (Spring Timing) */
   --nm-transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
   --nm-transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 差异化多语言字体系统 (英文 Inter，中文系统/Noto，代码 JetBrains Mono) */
+  --nm-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --nm-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-/* 全局基底 */
+/* 全局基底与字型设定 */
 html, body {
   margin: 0;
   padding: 0;
   background-color: var(--nm-bg);
   color: var(--nm-text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--nm-font-sans);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+code, kbd, samp, pre {
+  font-family: var(--nm-font-mono);
 }
 
 /* 拟物卡片容器基础类 */
@@ -318,4 +328,56 @@ html, body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* ── 可拖拽调整上边界高度的输入框把手 ── */
+.input-resize-handle {
+  width: 100%;
+  height: 18px;
+  margin-top: -18px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  user-select: none;
+  touch-action: none;
+  position: relative;
+  padding: 4px 0;
+  transition: opacity var(--nm-transition);
+}
+
+.input-resize-handle .resize-bar {
+  width: 48px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #cbd5e1;
+  box-shadow: inset 1px 1px 2px rgba(166, 180, 200, 0.4);
+  transition: background 0.15s ease, width 0.15s ease, height 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input-resize-handle:hover .resize-bar,
+.input-resize-handle.is-dragging .resize-bar {
+  background: var(--nm-primary);
+  width: 72px;
+  height: 5px;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.6);
+}
+
+/* 拖拽调整输入框大小时：全局禁用过渡动画，实现 1:1 零延迟直接响应，彻底消除阻尼卡顿感 */
+body.is-resizing-input,
+body.is-resizing-input * {
+  user-select: none !important;
+  cursor: row-resize !important;
+}
+
+body.is-resizing-input .chat-input-container,
+body.is-resizing-input .input-sunken-well,
+body.is-resizing-input .el-textarea__inner,
+body.is-resizing-input .input-resize-handle,
+.chat-input-container.is-resizing,
+.chat-input-container.is-resizing *,
+.chat-input-container.is-resizing .input-sunken-well,
+.chat-input-container.is-resizing .el-textarea__inner {
+  transition: none !important;
 }

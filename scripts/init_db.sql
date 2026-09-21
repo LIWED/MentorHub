@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
     target_position  VARCHAR(128) NOT NULL DEFAULT '',
     resume_review_id UUID REFERENCES resume_reviews(id),
     summary          TEXT,
+    runtime_state    JSONB,
     report           JSONB,
     overall_score    INT,
     status           VARCHAR(16) NOT NULL DEFAULT 'in_progress'

@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from backend.agents.interview.graph import build_interview_graph
 from backend.agents.interview.state import InterviewStage
+from backend.agents.interview.runtime_state import deserialize_runtime_state
 from backend.core.logger import get_logger
 from backend.core.memory import build_thread_id, build_config
 from backend.dependencies import AsyncSessionLocal, get_current_user
@@ -27,6 +28,45 @@ class StartSessionRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str                           # 学员这一轮发的消息
+
+
+class HistoryMessage(BaseModel):
+    role: str
+    content: str
+
+
+class HistoryResponse(BaseModel):
+    session_id: str
+    status: str
+    current_stage: str
+    total_turns: int
+    messages: list[HistoryMessage]
+
+
+def _decode_runtime_state(value) -> dict:
+    if not value:
+        return {}
+    try:
+        payload = value if isinstance(value, dict) else json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return deserialize_runtime_state(payload)
+
+
+async def _ensure_graph_state(config: dict, runtime_state) -> dict:
+    """Return current graph state, hydrating MemorySaver from DB when needed."""
+    snapshot = await _graph.aget_state(config)
+    state = snapshot.values if snapshot and snapshot.values else {}
+    if state:
+        return state
+
+    restored = _decode_runtime_state(runtime_state)
+    if not restored:
+        return {}
+
+    await _graph.aupdate_state(config, restored)
+    return restored
+
 
 @router.post("/sessions", status_code=201)
 async def start_session(
@@ -125,23 +165,31 @@ async def chat(
     student_id = current_user["user_id"]                 # 学员 ID
     tenant_id  = current_user["tenant_id"]               # 租户 ID
 
-    # 验证 session 归属（防止越权访问别人的会话）
+    # 验证 session 归属，并取持久化运行状态作为 MemorySaver 的恢复兜底。
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("""
-                SELECT session_id FROM interview_sessions
+                SELECT status, runtime_state
+                FROM interview_sessions
                 WHERE session_id = :session_id
                   AND tenant_id  = :tenant_id
                   AND student_id = :student_id
             """),
             {"session_id": session_id, "tenant_id": tenant_id, "student_id": student_id},
         )
-        if not result.fetchone():                        # 查不到 → 不属于该用户
+        row = result.mappings().fetchone()
+        if not row:
             raise HTTPException(status_code=404, detail="面试会话不存在")
 
-    config = build_config(student_id, session_id)        # 带 thread_id 的运行配置
+    if row["status"] == "finished":
+        raise HTTPException(status_code=409, detail="面试已结束，请查看面试报告")
 
-    # 只传增量：完整 State 由 MemorySaver 按 thread_id 自动恢复
+    config = build_config(student_id, session_id)        # 带 thread_id 的运行配置
+    state = await _ensure_graph_state(config, row["runtime_state"])
+    if not state:
+        raise HTTPException(status_code=409, detail="面试运行状态已失效，请重新开始面试")
+
+    # 只传增量：完整 State 从 MemorySaver 或 DB runtime_state 恢复。
     state_update = {
         "messages":   [HumanMessage(content=req.message)],  # 学员新消息（add_messages 会追加）
         "student_id": student_id,                        # 显式带上，防 MemorySaver 丢失时崩
@@ -174,6 +222,60 @@ async def chat(
         }
 
     return response
+
+
+@router.get("/sessions/{session_id}/history", response_model=HistoryResponse)
+async def get_session_history(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """恢复进行中的面试会话，用于前端重新进入页面后重建聊天界面。"""
+    student_id = current_user["user_id"]
+    tenant_id = current_user["tenant_id"]
+
+    # 数据库中的 runtime_state 是 MemorySaver 的持久化兜底，可跨页面甚至跨后端重启恢复。
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT status, runtime_state
+                FROM interview_sessions
+                WHERE session_id = :session_id
+                  AND tenant_id = :tenant_id
+                  AND student_id = :student_id
+            """),
+            {
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+            },
+        )
+        row = result.mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="面试会话不存在")
+
+    config = build_config(student_id, session_id)
+    state = await _ensure_graph_state(config, row["runtime_state"])
+
+    if row["status"] == "in_progress" and not state:
+        raise HTTPException(
+            status_code=409,
+            detail="这条旧面试记录没有可恢复状态，请重新开始面试",
+        )
+
+    current_stage = state.get("current_stage") or (
+        InterviewStage.FINISHED.value
+        if row["status"] == "finished"
+        else InterviewStage.WARMUP.value
+    )
+
+    return HistoryResponse(
+        session_id=session_id,
+        status=row["status"],
+        current_stage=current_stage,
+        total_turns=int(state.get("total_turn_count", 0)),
+        messages=_serialize_interview_messages(state.get("messages", [])),
+    )
 
 
 @router.get("/sessions/{session_id}/report")
@@ -266,15 +368,29 @@ async def chat_stream(
     student_id = current_user["user_id"]                 # 学员 ID
     tenant_id  = current_user["tenant_id"]               # 租户 ID
 
-    async with AsyncSessionLocal() as db:                # 验证会话归属
+    async with AsyncSessionLocal() as db:                # 验证会话归属并取持久化状态
         result = await db.execute(
-            text("SELECT session_id FROM interview_sessions WHERE session_id = :sid AND tenant_id = :tid"),
-            {"sid": session_id, "tid": tenant_id},
+            text("""
+                SELECT status, runtime_state
+                FROM interview_sessions
+                WHERE session_id = :sid
+                  AND tenant_id = :tid
+                  AND student_id = :uid
+            """),
+            {"sid": session_id, "tid": tenant_id, "uid": student_id},
         )
-        if not result.fetchone():
+        row = result.mappings().fetchone()
+        if not row:
             raise HTTPException(status_code=404, detail="面试会话不存在")
 
+    if row["status"] == "finished":
+        raise HTTPException(status_code=409, detail="面试已结束，请查看面试报告")
+
     config = build_config(student_id, session_id)        # 带 thread_id 的运行配置
+    state = await _ensure_graph_state(config, row["runtime_state"])
+    if not state:
+        raise HTTPException(status_code=409, detail="这条旧面试记录没有可恢复状态，请重新开始面试")
+
     state_update = {                                     # 只传增量（同 /chat）
         "messages":   [HumanMessage(content=req.message)],
         "student_id": student_id,
@@ -341,11 +457,34 @@ def _get_last_ai_message(messages: list) -> str:
     """提取消息列表中最后一条面试官（AI）消息的文本。"""
     for msg in reversed(messages):                    # 从后往前找
         if isinstance(msg, AIMessage):                # 找到最后一条 AI 消息
-            content = msg.content
-            if isinstance(content, list):             # 多模态：拼接各片段文本
-                return "".join(
-                    p.get("text", "") if isinstance(p, dict) else str(p)
-                    for p in content
-                )
-            return str(content)                       # 普通字符串直接返回
+            return _message_text(msg)
     return "面试已开始，请等待面试官回应..."           # 没有 AI 消息时的兜底文案
+
+
+def _message_text(message: BaseMessage) -> str:
+    """把 LangChain 消息内容统一转成前端可展示的纯文本。"""
+    content = message.content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content)
+
+
+def _serialize_interview_messages(messages: list[BaseMessage]) -> list[HistoryMessage]:
+    """仅导出用户/面试官可见消息，并隐藏内部的启动占位消息。"""
+    history: list[HistoryMessage] = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, AIMessage):
+            role = "assistant"
+        else:
+            continue
+
+        content = _message_text(message).strip()
+        if not content or (role == "user" and content == "[开始面试]"):
+            continue
+        history.append(HistoryMessage(role=role, content=content))
+    return history

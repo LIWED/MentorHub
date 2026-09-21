@@ -37,6 +37,10 @@ _MIGRATIONS: list[tuple[str, str]] = [
         "ON resume_reviews (student_id, created_at DESC)",
     ),
     (
+        "interview_sessions.runtime_state",
+        "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS runtime_state JSONB",
+    ),
+    (
         "idx_interview_sessions_student_created",
         "CREATE INDEX IF NOT EXISTS idx_interview_sessions_student_created "
         "ON interview_sessions (student_id, created_at DESC)",
