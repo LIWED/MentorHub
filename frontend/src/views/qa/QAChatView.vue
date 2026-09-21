@@ -82,13 +82,24 @@
       </div>
 
       <!-- 底部输入区 -->
-      <div class="chat-input-container">
+      <div class="chat-input-container" :class="{ 'is-resizing': isDraggingInput }">
+        <!-- 顶部拖拽调整把手 (上边界) -->
+        <div
+          class="input-resize-handle"
+          :class="{ 'is-dragging': isDraggingInput }"
+          title="上下拉动上边界可调整输入框宽度/高度，双击恢复默认"
+          @mousedown="handleResizeStart"
+          @dblclick="resetInputHeight"
+        >
+          <span class="resize-bar" />
+        </div>
+
         <div class="input-sunken-well">
           <el-input
             ref="inputRef"
             v-model="inputText"
             type="textarea"
-            :rows="3"
+            :style="{ '--custom-textarea-height': `${inputHeight}px` }"
             placeholder="输入你的技术问题... Enter 发送，Shift+Enter 换行"
             resize="none"
             :disabled="isStreaming"
@@ -146,12 +157,16 @@ import ChatBubble from '@/components/chat/ChatBubble.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import { useAuthStore } from '@/stores/auth'
 import { qaApi } from '@/api/qa'
+import { useResizableInput } from '@/composables/useResizableInput'
 import iconQa from '@/assets/images/icon_qa.jpg'
 
 // 明确声明组件名，保证 AppLayout 中的 keep-alive 能准确命中
 defineOptions({ name: 'QAChatView' })
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8000'
+
+// 可调节输入框上边界高度/宽度
+const { inputHeight, isDraggingInput, handleResizeStart, resetInputHeight } = useResizableInput()
 
 interface Message {
   role: 'user' | 'assistant'
@@ -652,7 +667,7 @@ onMounted(async () => {
   box-shadow: var(--nm-shadow-inset);
   border: 1px solid rgba(255, 255, 255, 0.4);
   padding: 10px 14px 8px;
-  transition: var(--nm-transition-smooth);
+  transition: box-shadow var(--nm-transition), border-color var(--nm-transition);
 }
 
 .input-sunken-well:focus-within {
@@ -666,6 +681,12 @@ onMounted(async () => {
   padding: 4px 0 !important;
   font-size: 14px;
   line-height: 1.6;
+  height: var(--custom-textarea-height, 76px) !important;
+  min-height: 54px;
+  max-height: 500px;
+  overflow-y: auto;
+  resize: none !important;
+  transition: none !important;
 }
 
 .input-actions-bar {

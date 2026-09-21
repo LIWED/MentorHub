@@ -8,7 +8,8 @@ MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将�
 
 | 模块 | 主要能力 | 关键实现 |
 | --- | --- | --- |
-| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query 分类、Query Rewrite、HyDE、Multi Query、Hybrid Retrieval、BGE Rerank、MCP Web Search、Memory |
+| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query 分类、Query Rewrite、HyDE、Multi Query、Iterative Retrieval、Hybrid Retrieval、BGE Rerank、MCP Web Search、Memory |
+| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office 等文档解析、结构化入库、Markdown 图片抽取 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、Heading Chunking、BGE-M3 + BM25 |
 | **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
 | **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
 | **Interview · 模拟面试** | 多阶段技术面试、回答评价、追问与最终报告 | LangGraph 状态流转、分阶段对话、回答评估、会话记忆 |
@@ -31,7 +32,10 @@ QA Agent 首先将问题区分为：
 - **Precise Retrieval**：问题表达清晰时直接检索。
 - **Query Rewrite**：结合会话历史补全指代、省略信息。
 - **HyDE**：对语义模糊的问题生成 hypothetical document，再用于检索。
-- **Multi Query**：对宽泛问题拆出多个查询，提高召回覆盖率。
+- **Multi Query**：对宽泛、可独立拆分的问题生成最多 3 个子查询并行检索，提高召回覆盖率。
+- **Iterative Retrieval**：对存在前后依赖的问题先规划最多 3 个逻辑问题，再根据上一阶段检索证据展开下一阶段 Query，最多进行 3 轮受控依赖检索。
+
+其中 **BROAD / Multi Query** 处理的是“检索前就能独立拆开的多个子问题”，而 **ITERATIVE** 只用于“后一个问题依赖前一个问题检索结果”的场景，避免把所有复合问题都误判成多跳检索。
 
 ### Hybrid Retrieval
 
@@ -59,11 +63,11 @@ Query
 - BM25：应用侧使用 Jieba 分词并计算 BM25 权重，写入 Milvus Sparse Vector 完成关键词召回。
 - Vector DB：**Milvus**
 - Fusion：`WeightedRanker(0.7, 0.3)`，Dense / BM25 权重分别为 0.7 / 0.3。
-- Reranker：**BGE-Reranker-v2-m3** Cross Encoder。
-- Hybrid Recall：默认 Top 10。
+- Reranker：本地配置模型优先（默认路径 `models/reranker/bge-reranker-large`），本地权重不可用时回退到 **BAAI/bge-reranker-v2-m3**。
+- Hybrid Recall：按策略动态设置，PRECISE=8、VAGUE=10、BROAD=每个子 Query 4、ITERATIVE=每个展开 Query 6。
 - Rerank：默认保留 Top 3。
 
-当 Reranker Top-1 置信度低于代码设定阈值时，QA Agent 可以进入 Web Search 兜底链路。
+PRECISE / VAGUE / BROAD 分支使用 Reranker Top-1 分数进行置信度判断，当前经验阈值为 **0.75**；低于阈值且开启联网搜索时进入 Web Search 兜底。ITERATIVE 分支则结合各逻辑问题证据，并由 LLM 进行 evidence sufficiency 判断。
 
 ### 多轮记忆
 
@@ -75,7 +79,87 @@ QA / Interview 使用 LangGraph `MemorySaver` 保存会话状态，并实现：
 
 ---
 
-## 2. ResumePilot：智能简历评审 Agent
+## 2. 知识入库与文档解析
+
+知识入库与在线 QA 解耦：复杂文档只在 **离线 ingestion 阶段**解析，不会把 MinerU 放进在线问答链路。
+
+当前文档入口统一经过 `ParserRegistry`：
+
+```text
+File
+ │
+ ├─ .md / .markdown ──→ MarkdownParser
+ ├─ .txt ─────────────→ TextParser
+ └─ PDF / 图片 / Office / HTML / EPUB ...
+                         ↓
+                    MinerUParser
+                         ↓
+              structured_content / Markdown
+                         ↓
+                   LangChain Document
+                         ↓
+                 Heading / Text Chunking
+                         ↓
+                 BGE-M3 + BM25
+                         ↓
+                      Milvus
+```
+
+### MinerU 独立环境
+
+MinerU 使用独立 Python 环境，通过 `scripts/mineru_parse_worker.py` 由主项目 subprocess 调用，避免 MinerU 的模型依赖与在线 RAG 环境中的 PyTorch / Transformers 版本相互污染。
+
+推荐配置：
+
+```text
+EduAgent 主环境     → requirements.txt
+MinerU 独立环境     → requirements-mineru.txt
+```
+
+PDF 若 MinerU 不可用或解析失败，会降级到 `LegacyPdfParser / PyPDFLoader`；其它富文档则保留显式错误，避免静默丢失复杂内容。
+
+### Markdown 图片
+
+`MarkdownImageResolver` 会识别 Markdown 中的：
+
+```markdown
+![架构图](./images/rag.png)
+<img src="./images/flow.png" alt="流程图" />
+```
+
+当前支持：
+
+- 本地相对路径和 Windows 绝对路径；
+- HTTP / HTTPS 图片下载；
+- 同一图片重复引用去重；
+- MinerU 图片解析失败不阻断整篇 Markdown；
+- 图片文本回填到原图片引用后，再进入正常 Markdown Chunking；
+- 过滤只有图片路径的低价值结果；
+- 过滤明显由占位节点组成的错误 Mermaid。
+
+回填后的文本形式类似：
+
+```text
+[图片内容：RAG 架构图]
+...OCR / 表格 / 公式 / 可用图片文本...
+[/图片内容]
+```
+
+> 当前 **普通截图、文本型图片、表格/公式图片** 已能进入知识库；复杂流程图和架构图的“节点连线关系”仍属于持续优化项。仓库中的 Ollama / Qwen3.5 图像理解脚本目前是实验工具，尚未作为正式默认 ingestion 能力接入。
+
+### Contextual RAG
+
+`scripts/build_knowledge_base.py` 保留了 Contextual RAG 上下文增强能力，但当前默认：
+
+```python
+use_context = False
+```
+
+原因是该步骤会为每个 Chunk 额外调用 LLM，成本较高。需要实验时可显式开启，不影响默认的 Parser → Chunk → BGE-M3 + BM25 → Milvus 链路。
+
+---
+
+## 3. ResumePilot：智能简历评审 Agent
 
 ResumePilot 将简历处理拆成一条 LangGraph Workflow：
 
@@ -116,7 +200,7 @@ PDF
 
 ---
 
-## 3. Exam：智能试卷批改 Agent
+## 4. Exam：智能试卷批改 Agent
 
 Exam Agent 将题目按类型拆成三条批改轨道，并并行执行：
 
@@ -144,7 +228,7 @@ Exam Agent 将题目按类型拆成三条批改轨道，并并行执行：
 
 ---
 
-## 4. Interview：模拟面试 Agent
+## 5. Interview：模拟面试 Agent
 
 Interview Agent 使用 LangGraph 管理面试状态，主要流程包括：
 
@@ -186,16 +270,17 @@ Generate Final Report
 
 | 类型 | 技术 |
 | --- | --- |
-| Language | Python 3.11 |
+| Language | Python 3.10+ |
 | API | FastAPI 0.117.1 / Uvicorn |
 | Agent Framework | LangChain 1.2.10 / LangGraph 1.0.9 |
 | Structured Data | Pydantic 2 |
 | Relational DB | PostgreSQL 15 / SQLAlchemy Async |
 | Vector DB | Milvus 2.4.0 |
 | Embedding | BGE-M3 |
-| Reranker | BGE-Reranker-v2-m3 |
+| Sparse Retrieval | BM25 + Jieba |
+| Reranker | BGE Reranker（本地模型优先，v2-m3 fallback） |
 | Model Runtime | Transformers / Sentence Transformers / FlagEmbedding / PyTorch |
-| Document Parsing | pdfplumber / PyMuPDF / python-docx |
+| Document Parsing | MinerU 4.x（独立环境）/ Markdown Parser / PyPDF fallback / pdfplumber / PyMuPDF / python-docx |
 | Tool Protocol | MCP |
 
 LLM 调用统一通过 `backend/core/llm_factory.py` 管理，并使用 OpenAI-compatible 接口进行模型接入。
@@ -234,6 +319,7 @@ MentorHub/
 │  │  ├─ reranker.py           # BGE Reranker
 │  │  ├─ query_classifier.py   # QA Query 二分类
 │  │  ├─ memory.py             # 多轮上下文与摘要
+│  │  ├─ parsers/              # Parser Registry / MinerU / Markdown 图片解析
 │  │  └─ retry.py              # 重试 / 降级
 │  ├─ mcp/
 │  │  ├─ knowledge_base_server.py
@@ -245,12 +331,19 @@ MentorHub/
 │  ├─ init_db.sql
 │  ├─ init_milvus.py
 │  ├─ build_knowledge_base.py
+│  ├─ mineru_parse_worker.py   # 独立 MinerU 环境解析 Worker
+│  ├─ test_document_extract.py # 文档解析独立 smoke test
+│  ├─ ollama_image_understanding_worker.py # 流程图视觉理解实验
 │  ├─ seed_data.py
 │  └─ seed_standard_exam.py
 ├─ tests/
-│  └─ resume/
+│  ├─ parsers/
+│  ├─ qa/
+│  ├─ resume/
+│  └─ interview/
 ├─ docker-compose.yml
 ├─ requirements.txt
+├─ requirements-mineru.txt
 └─ .env.example
 ```
 
@@ -267,7 +360,7 @@ cd MentorHub
 
 ### 2. 创建 Python 环境
 
-推荐使用 Python 3.11：
+主项目推荐使用 Python 3.11：
 
 ```bash
 conda create -n mentorhub python=3.11 -y
@@ -308,9 +401,36 @@ JWT_SECRET_KEY=your_random_secret
 
 # QA 联网搜索需要时配置
 TAVILY_API_KEY=your_tavily_key
+
+# 富文档 / 图片入库推荐配置独立 MinerU 环境
+MINERU_PYTHON_EXECUTABLE=<MinerU 环境的 python 路径>
+MINERU_TIER=basic
+MINERU_OUTPUT_ROOT=./data/mineru
+MINERU_TIMEOUT_SECONDS=900
+# 国内模型下载可配置：
+MINERU_MODEL_SOURCE=modelscope
 ```
 
-### 4. 启动基础设施
+### 4. 配置 MinerU 入库环境
+
+复杂 PDF、图片、Office、HTML 等富文档推荐单独创建 MinerU 环境。MinerU 不建议直接安装进 MentorHub 主环境。
+
+```bash
+conda create -n mentorhub-mineru python=3.12 -y
+conda activate mentorhub-mineru
+pip install -r requirements-mineru.txt
+```
+
+然后把该环境的 Python 路径写入 `.env.local`：
+
+```ini
+# Windows 示例
+MINERU_PYTHON_EXECUTABLE=F:\path\to\envs\mentorhub-mineru\python.exe
+```
+
+Markdown / TXT 不依赖 MinerU；PDF 在 MinerU 不可用时仍有文本层 fallback，但扫描 PDF、图片和复杂版面建议使用 MinerU。
+
+### 5. 启动基础设施
 
 当前 `docker-compose.yml` 包含：
 
@@ -326,7 +446,7 @@ TAVILY_API_KEY=your_tavily_key
 docker compose --env-file .env.local up -d
 ```
 
-### 5. 初始化 Milvus
+### 6. 初始化 Milvus
 
 ```bash
 python scripts/init_milvus.py
@@ -339,7 +459,7 @@ python scripts/seed_data.py
 python scripts/seed_standard_exam.py
 ```
 
-### 6. 导入知识库文档
+### 7. 导入知识库文档
 
 当前 `scripts/build_knowledge_base.py` 通过脚本底部常量配置导入参数。首次使用前修改：
 
@@ -357,9 +477,17 @@ USE_CONTEXT = False
 python scripts/build_knowledge_base.py
 ```
 
-当前默认关闭 Contextual RAG，避免为每个 chunk 额外调用 LLM 产生较高成本。需要时可显式设置 `USE_CONTEXT=True` 开启上下文增强；之后再生成 BGE-M3 Dense 向量，并基于当前语料重建 BM25 稀疏权重后写入 Milvus。
+入库阶段会先经过 Parser Registry。Markdown 会保留标题结构并解析其中的图片引用；PDF / 图片 / Office 等复杂文档优先交给 MinerU。解析后的内容统一包装为 LangChain `Document(page_content + metadata)`，再进行 Chunking、BGE-M3 Dense 编码和 BM25 稀疏权重构建。
 
-### 7. 启动后端
+当前默认关闭 Contextual RAG，避免为每个 chunk 额外调用 LLM 产生较高成本。需要时可显式设置 `USE_CONTEXT=True` 开启上下文增强。
+
+如只想测试“文档能否正确提取”，不执行 Embedding / BM25 / Milvus，可运行：
+
+```bash
+python scripts/test_document_extract.py "<文档路径>" --preview 3000
+```
+
+### 8. 启动后端
 
 在项目根目录执行：
 
@@ -373,7 +501,7 @@ API 文档：
 http://localhost:8000/docs
 ```
 
-### 8. 启动前端
+### 9. 启动前端
 
 ```bash
 cd frontend
@@ -429,19 +557,39 @@ http://localhost:3000
 
 ## 测试
 
-当前仓库已有 ResumePilot 相关测试：
+Parser 与 KnowFlow Iterative Retrieval：
+
+```bash
+pytest tests/parsers/test_document_parsers.py tests/qa/test_iterative_retrieval.py -q
+```
+
+ResumePilot：
 
 ```bash
 pytest tests/resume -q
 ```
 
-此外，`backend/api/v1/` 下保留了 QA、Exam、Resume、Interview 的 E2E 验证脚本，可用于单独检查各业务链路。
+模拟面试相关回归：
+
+```bash
+pytest tests/interview -q
+```
+
+此外，`backend/api/v1/` 下保留了部分业务 E2E 验证脚本，可用于单独检查 QA、Exam、Resume、Interview 等链路。
 
 ---
 
 ## 当前实现说明
 
 MentorHub 仍处于持续开发阶段。README 以当前仓库代码为准，重点展示已经落地的 Agent Workflow、RAG 检索链路与工程结构，不将规划中的能力写成已完成功能。
+
+当前几个需要特别区分的边界：
+
+- **Contextual RAG**：代码保留，但默认关闭，只在需要时显式开启；
+- **MinerU**：只用于离线知识入库，不进入在线 QA 请求链路；
+- **Markdown 图片**：普通 OCR / 文本型图片已进入正式入库链路；
+- **复杂流程图 / 架构图**：节点关系恢复仍在优化，`scripts/ollama_image_understanding_worker.py` 属于实验代码，目前未作为默认生产能力接入；
+- **Parent-Child Retrieval**：当前没有启用，现阶段仍使用 Heading-aware Chunking + Hybrid Retrieval + Rerank。
 
 如果运行环境、模型或基础设施配置发生变化，请优先检查：
 

@@ -8,6 +8,7 @@ import './assets/styles/neumorphism.css'
 
 import App from './App.vue'
 import router from './router'
+import MarkdownRenderer from './components/chat/MarkdownRenderer.vue'
 
 const app = createApp(App)
 
@@ -15,6 +16,9 @@ const app = createApp(App)
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
 }
+
+// 注册全局 Markdown 渲染组件，确保所有聊天与问答模块均可直接使用
+app.component('MarkdownRenderer', MarkdownRenderer)
 
 // 全局错误兜底：防止 Vue 调度器或组件更新过程中的错误以 unhandled rejection 形式
 // 崩溃整个应用。具体恢复逻辑由 AppLayout 的 onErrorCaptured 处理。

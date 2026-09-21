@@ -10,6 +10,7 @@ from sqlalchemy import text
 from backend.agents.interview.state import (
     InterviewState, InterviewStage, AnswerQuality, InterviewReport,
 )
+from backend.agents.interview.runtime_state import serialize_runtime_state
 from backend.agents.interview.prompts import (
     SYSTEM_PROMPT, WARMUP_PROMPT, INTRO_EVAL_TECH_FIRST_PROMPT,
     TECH_BASE_PROMPT, PROJECT_PROMPT, CLOSING_PROMPT,
@@ -931,19 +932,27 @@ async def save_memory_node(state: InterviewState) -> dict:
         except Exception as e:
             logger.warning("save_memory.compress_failed", error=str(e))
 
+    runtime_payload = dict(state)
+    runtime_payload["existing_summary"] = summary
+    runtime_state = json.dumps(
+        serialize_runtime_state(runtime_payload), ensure_ascii=False, default=str
+    )
+
     async with AsyncSessionLocal() as session:           # 开异步 DB 会话
         try:
             await session.execute(                       # UPSERT：存在则更新摘要，不存在则插入
                 text("""
                     INSERT INTO interview_sessions
                         (id, tenant_id, student_id, session_id, thread_id,
-                         target_position, resume_review_id, summary, status)
+                         target_position, resume_review_id, summary, runtime_state, status)
                     VALUES
                         (:id, :tenant_id, :student_id, :session_id, :thread_id,
-                         :target_position, :resume_review_id, :summary, 'in_progress')
+                         :target_position, :resume_review_id, :summary,
+                         CAST(:runtime_state AS JSONB), 'in_progress')
                     ON CONFLICT (thread_id) DO UPDATE
-                        SET summary    = EXCLUDED.summary,
-                            updated_at = NOW()
+                        SET summary       = EXCLUDED.summary,
+                            runtime_state = EXCLUDED.runtime_state,
+                            updated_at    = NOW()
                 """),
                 {
                     "id":               str(uuid.uuid4()),              # 插入时的新主键
@@ -954,6 +963,7 @@ async def save_memory_node(state: InterviewState) -> dict:
                     "target_position":  state.get("target_position", ""),
                     "resume_review_id": state.get("resume_review_id"),
                     "summary":          summary,                        # 最新摘要
+                    "runtime_state":    runtime_state,                  # 可恢复的完整运行状态
                 },
             )
             await session.commit()                       # 提交

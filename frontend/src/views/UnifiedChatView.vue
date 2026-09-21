@@ -100,13 +100,24 @@
       </div>
 
       <!-- 底部输入区 -->
-      <div class="chat-input-container">
+      <div class="chat-input-container" :class="{ 'is-resizing': isDraggingInput }">
+        <!-- 顶部拖拽调整把手 (上边界) -->
+        <div
+          class="input-resize-handle"
+          :class="{ 'is-dragging': isDraggingInput }"
+          title="上下拉动上边界可调整输入框宽度/高度，双击恢复默认"
+          @mousedown="handleResizeStart"
+          @dblclick="resetInputHeight"
+        >
+          <span class="resize-bar" />
+        </div>
+
         <div class="input-sunken-well">
           <el-input
             ref="inputRef"
             v-model="inputText"
             type="textarea"
-            :rows="3"
+            :style="{ '--custom-textarea-height': `${inputHeight}px` }"
             placeholder="直接描述您的需求（例如：帮我审查简历并准备模拟面试），Enter 发送，Shift+Enter 换行"
             resize="none"
             :disabled="isStreaming"
@@ -149,9 +160,13 @@ import RoutingDecisionCard from '@/components/chat/RoutingDecisionCard.vue'
 import PipelinePlanCard from '@/components/chat/PipelinePlanCard.vue'
 import iconAiHero from '@/assets/images/icon_ai_hero.svg'
 import { useAuthStore } from '@/stores/auth'
+import { useResizableInput } from '@/composables/useResizableInput'
 
 const router = useRouter()
 const auth = useAuthStore()
+
+// 可调节输入框上边界高度/宽度
+const { inputHeight, isDraggingInput, handleResizeStart, resetInputHeight } = useResizableInput()
 
 interface RoutingDecision {
   agent_type: string
@@ -545,7 +560,7 @@ async function scrollToBottom() {
   box-shadow: var(--nm-shadow-inset);
   border: 1px solid rgba(255, 255, 255, 0.4);
   padding: 10px 14px 8px;
-  transition: var(--nm-transition-smooth);
+  transition: box-shadow var(--nm-transition), border-color var(--nm-transition);
 }
 
 .input-sunken-well:focus-within {
@@ -559,6 +574,12 @@ async function scrollToBottom() {
   padding: 4px 0 !important;
   font-size: 14px;
   line-height: 1.6;
+  height: var(--custom-textarea-height, 76px) !important;
+  min-height: 54px;
+  max-height: 500px;
+  overflow-y: auto;
+  resize: none !important;
+  transition: none !important;
 }
 
 .input-actions-bar {

@@ -65,11 +65,11 @@
 
       <!-- 内容区 -->
       <el-main class="app-main">
-        <!-- keep-alive 仅保留 QAChatView 状态，导航离开时冻结而非销毁 -->
-        <router-view v-slot="{ Component }" :key="routerViewKey">
+        <!-- QA 与进行中的模拟面试离开页面时冻结而非销毁，返回后直接续上现场。 -->
+        <router-view v-slot="{ Component, route }" :key="routerViewKey">
           <transition name="page-fade" mode="out-in">
-            <keep-alive :include="['QAChatView']">
-              <component :is="Component" />
+            <keep-alive :include="['QAChatView', 'InterviewChatView']">
+              <component :is="Component" :key="route.fullPath" />
             </keep-alive>
           </transition>
         </router-view>

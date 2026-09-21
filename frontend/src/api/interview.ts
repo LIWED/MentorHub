@@ -75,6 +75,19 @@ export interface SessionListItem {
   created_at: string
 }
 
+export interface InterviewHistoryMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface InterviewHistoryResponse {
+  session_id: string
+  status: string
+  current_stage: string
+  total_turns: number
+  messages: InterviewHistoryMessage[]
+}
+
 export const interviewApi = {
   startSession: (data: StartSessionRequest) =>
     client.post<StartSessionResponse>('/interview/sessions', data),
@@ -169,4 +182,7 @@ export const interviewApi = {
 
   listSessions: () =>
     client.get<{ items: SessionListItem[]; total: number }>('/interview/sessions'),
+
+  getHistory: (sessionId: string) =>
+    client.get<InterviewHistoryResponse>(`/interview/sessions/${sessionId}/history`),
 }

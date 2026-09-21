@@ -18,6 +18,10 @@
     </div>
     <div class="bubble-body">
       <div class="bubble-content" :class="role">
+        <div v-if="role === 'assistant'" class="assistant-badge">
+          <span class="badge-dot" />
+          <span class="badge-text">MentorHub AI</span>
+        </div>
         <slot />
       </div>
       <div v-if="role === 'assistant' && sources?.length" class="sources-box">
@@ -124,13 +128,48 @@ defineProps<{
   border-bottom-right-radius: 4px;
 }
 
-/* AI 助手气泡：纯白微凸起新拟物卡片 */
+.bubble-content.user :deep(.md-content),
+.bubble-content.user :deep(.md-content p),
+.bubble-content.user :deep(.md-content span),
+.bubble-content.user :deep(.md-content strong) {
+  color: #ffffff !important;
+}
+
+/* AI 助手气泡：精致微拟物卡片，告别纯白单调 */
 .bubble-content.assistant {
-  background: #ffffff;
+  background: linear-gradient(150deg, #ffffff 0%, #f8fafc 40%, #f1f5f9 100%);
   color: var(--nm-text-primary);
-  box-shadow: 4px 4px 12px rgba(166, 180, 200, 0.35), -4px -4px 12px rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 6px 6px 18px rgba(166, 180, 200, 0.3), -4px -4px 14px rgba(255, 255, 255, 0.95), inset 0 1px 1px rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  border-top-color: #ffffff;
+  border-left-color: #ffffff;
   border-bottom-left-radius: 4px;
+  padding: 14px 20px;
+}
+
+.assistant-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  height: 20px;
+  border-radius: var(--nm-radius-full);
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  color: var(--nm-primary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+  user-select: none;
+}
+
+.badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--nm-primary);
+  box-shadow: 0 0 6px var(--nm-primary);
 }
 
 /* 来源折叠面板 */

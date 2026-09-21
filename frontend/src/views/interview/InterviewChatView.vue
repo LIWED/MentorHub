@@ -120,6 +120,19 @@
             <MarkdownRenderer :content="msg.content" />
           </ChatBubble>
 
+          <ChatBubble v-if="restoringHistory && !messages.length" role="assistant">
+            <div class="thinking">
+              <div class="wave-dots">
+                <span class="dot" /><span class="dot" /><span class="dot" />
+              </div>
+              <span class="stage-text">正在恢复上次面试记录...</span>
+            </div>
+          </ChatBubble>
+
+          <ChatBubble v-if="sessionUnavailable && !messages.length" role="assistant">
+            <MarkdownRenderer content="当前面试的运行状态已失效，请返回面试中心重新开始一次面试。" />
+          </ChatBubble>
+
           <!-- 流式思考中/等待 -->
           <ChatBubble v-if="loading && !streamingReply" role="assistant">
             <div class="thinking">
@@ -131,15 +144,26 @@
           </ChatBubble>
         </div>
 
-        <div class="chat-input-container">
+        <div class="chat-input-container" :class="{ 'is-resizing': isDraggingInput }">
+          <!-- 顶部拖拽调整把手 (上边界) -->
+          <div
+            class="input-resize-handle"
+            :class="{ 'is-dragging': isDraggingInput }"
+            title="上下拉动上边界可调整输入框宽度/高度，双击恢复默认"
+            @mousedown="handleResizeStart"
+            @dblclick="resetInputHeight"
+          >
+            <span class="resize-bar" />
+          </div>
+
           <div class="input-sunken-well">
             <el-input
               v-model="inputText"
               type="textarea"
-              :rows="3"
+              :style="{ '--custom-textarea-height': `${inputHeight}px` }"
               placeholder="请输入你的回答... Ctrl+Enter 发送"
               resize="none"
-              :disabled="loading || isFinished"
+              :disabled="restoringHistory || sessionUnavailable || loading || isFinished"
               @keydown.ctrl.enter="sendMessage"
             />
 
@@ -155,7 +179,7 @@
                 <button
                   type="button"
                   class="end-interview-btn"
-                  :disabled="loading || isFinished"
+                  :disabled="restoringHistory || sessionUnavailable || loading || isFinished"
                   @click="endInterview"
                 >
                   结束面试
@@ -164,7 +188,7 @@
                 <button
                   type="button"
                   class="nm-send-btn"
-                  :disabled="!inputText.trim() || isFinished || loading"
+                  :disabled="restoringHistory || sessionUnavailable || !inputText.trim() || isFinished || loading"
                   :class="{ 'is-loading': loading }"
                   @click="sendMessage"
                 >
@@ -190,7 +214,11 @@ import ChatBubble from '@/components/chat/ChatBubble.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import StageProgressBar from '@/components/interview/StageProgressBar.vue'
 import { interviewApi, type InterviewReport } from '@/api/interview'
+import { useResizableInput } from '@/composables/useResizableInput'
 import client from '@/api/client'
+
+// 可调节输入框上边界高度/宽度
+const { inputHeight, isDraggingInput, handleResizeStart, resetInputHeight } = useResizableInput()
 
 interface Message {
   role: 'user' | 'assistant'
@@ -205,6 +233,8 @@ const messages = ref<Message[]>([])
 const inputText = ref('')
 const loading = ref(false)
 const streamingReply = ref(false)
+const restoringHistory = ref(true)
+const sessionUnavailable = ref(false)
 const currentStage = ref('warmup')
 const totalTurns = ref(0)
 const isFinished = ref(false)
@@ -214,7 +244,7 @@ const messagesEl = ref<HTMLElement>()
 // ── 发送消息（流式） ──────────────────────────────────────────
 async function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || loading.value) return
+  if (!text || loading.value || restoringHistory.value || sessionUnavailable.value) return
 
   messages.value.push({ role: 'user', content: text })
   inputText.value = ''
@@ -294,25 +324,50 @@ async function scrollToBottom() {
   }
 }
 
-onMounted(async () => {
-  const openingMessage = (history.state as any)?.openingMessage
-  if (openingMessage) {
-    messages.value.push({ role: 'assistant', content: openingMessage })
-  }
-
+async function restoreSession() {
+  restoringHistory.value = true
   try {
-    const res = await client.get(`/interview/sessions/${sessionId}/report`, {
-      validateStatus: (s: number) => s < 500,
-    })
-    if (res.status === 200 && res.data?.overall_score) {
+    const { data } = await interviewApi.getHistory(sessionId)
+    sessionUnavailable.value = false
+    messages.value = data.messages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    }))
+    currentStage.value = data.current_stage
+    totalTurns.value = data.total_turns
+
+    if (data.status === 'finished' || data.current_stage === 'finished') {
       isFinished.value = true
-      report.value = res.data
+      currentStage.value = 'finished'
+      await fetchReport()
+    }
+  } catch (error: any) {
+    // 新建会话时保留 history.state 作为短暂网络异常下的兜底；正常恢复以服务端 State 为准。
+    const openingMessage = (history.state as any)?.openingMessage
+    if (openingMessage) {
+      messages.value = [{ role: 'assistant', content: openingMessage }]
+    }
+
+    if (error?.response?.status === 409) {
+      // 409 已由 Axios 全局拦截器提示；这里仅切换页面状态，避免重复弹两条通知。
+      sessionUnavailable.value = true
+    } else if (!openingMessage) {
+      ElMessage.error('加载面试记录失败，请返回列表后重试')
+    }
+
+    // 已完成会话不依赖运行时 MemorySaver，报告仍可直接从数据库恢复。
+    await fetchReport()
+    if (report.value) {
+      isFinished.value = true
       currentStage.value = 'finished'
     }
-  } catch {
-    // ignore
+  } finally {
+    restoringHistory.value = false
+    await scrollToBottom()
   }
-})
+}
+
+onMounted(restoreSession)
 </script>
 
 <style scoped>
@@ -352,7 +407,7 @@ onMounted(async () => {
   box-shadow: var(--nm-shadow-inset);
   border: 1px solid rgba(255, 255, 255, 0.4);
   padding: 10px 14px 8px;
-  transition: var(--nm-transition-smooth);
+  transition: box-shadow var(--nm-transition), border-color var(--nm-transition);
 }
 
 .input-sunken-well:focus-within {
@@ -366,6 +421,12 @@ onMounted(async () => {
   padding: 4px 0 !important;
   font-size: 14px;
   line-height: 1.6;
+  height: var(--custom-textarea-height, 76px) !important;
+  min-height: 54px;
+  max-height: 500px;
+  overflow-y: auto;
+  resize: none !important;
+  transition: none !important;
 }
 
 .input-actions-bar {
