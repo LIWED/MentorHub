@@ -22,6 +22,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isTeacher = computed(() =>
     user.value?.role === 'teacher' || user.value?.role === 'admin'
   )
+  const isAdmin = computed(() => user.value?.role === 'admin')
 
   function login(accessToken: string, userInfo: UserInfo) {
     token.value = accessToken
@@ -37,5 +38,5 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('edu-agent-user')
   }
 
-  return { token, user, isLoggedIn, isTeacher, login, logout }
+  return { token, user, isLoggedIn, isTeacher, isAdmin, login, logout }
 })

@@ -58,10 +58,36 @@ class BGEReranker:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         logger.info("reranker.loading", model_id=model_id, device=device)
-        self._model = CrossEncoder(model_id, device=device, max_length=512)
+        # 显式关闭 low_cpu_mem_usage，避免通过 meta tensor 延迟物化权重。
+        # CrossEncoder 3.x 在 __init__ 中只记录 target device，真正的 .to(device)
+        # 默认要到第一次 predict() 才执行；这里提前完成设备迁移并校验，
+        # 让加载异常在启动阶段暴露，而不是污染第一个用户请求。
+        self._model = CrossEncoder(
+            model_id,
+            device=device,
+            max_length=512,
+            automodel_args={"low_cpu_mem_usage": False},
+        )
+        self._assert_no_meta_parameters(stage="after_load")
+        self._model.model.to(torch.device(device))
+        self._assert_no_meta_parameters(stage="after_device_move")
         self._predict_lock = threading.Lock()
         # print(f'self._model is {self._model}')
         logger.info("reranker.loaded", model_id=model_id)
+
+    def _assert_no_meta_parameters(self, *, stage: str) -> None:
+        """确保 Reranker 权重已真实物化，避免首个 predict() 才触发 meta tensor 错误。"""
+        meta_parameters = [
+            name
+            for name, parameter in self._model.model.named_parameters()
+            if getattr(parameter, "is_meta", False)
+        ]
+        if meta_parameters:
+            preview = meta_parameters[:5]
+            raise RuntimeError(
+                "Reranker model contains unmaterialized meta parameters "
+                f"at {stage}: {preview}"
+            )
 
     @classmethod
     def get_instance(cls) -> "BGEReranker":

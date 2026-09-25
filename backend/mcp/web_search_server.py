@@ -80,20 +80,24 @@ async def web_search(
     Returns:
         List of search results, each with title / url / snippet / content
     """
-    from backend.config import get_settings
     from backend.core.logger import get_logger
+    from backend.core.runtime_settings import get_runtime_settings
 
     logger = get_logger(__name__)
-    settings = get_settings()
+    api_settings = get_runtime_settings().api
 
-    # 优先 Tavily，失败后降级 DuckDuckGo
-    if settings.tavily_api_key:
+    # auto：有 Tavily Key 则优先 Tavily；duckduckgo：强制免费搜索；
+    # tavily：优先 Tavily，但 Key 缺失/调用失败时仍降级 DDG，避免整条 QA 链路中断。
+    use_tavily = api_settings.web_search_provider in {"auto", "tavily"}
+    if use_tavily and api_settings.tavily_api_key:
         try:
-            results = await _search_tavily(query, max_results, settings.tavily_api_key)
+            results = await _search_tavily(query, max_results, api_settings.tavily_api_key)
             logger.info("web_search_mcp.tavily_done", hits=len(results))
             return results
         except Exception as e:
             logger.warning("web_search_mcp.tavily_failed", error=str(e))
+    elif api_settings.web_search_provider == "tavily":
+        logger.warning("web_search_mcp.tavily_key_missing")
 
     try:
         results = await _search_duckduckgo(query, max_results)

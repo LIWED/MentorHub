@@ -9,8 +9,8 @@ from langchain.chat_models import init_chat_model     # 2.3 学的：创建聊�
 from langchain_core.language_models import BaseChatModel  # 聊天模型的基类（类型注解用）
 from langchain_core.runnables import Runnable         # 「可运行对象」基类，结构化模型属于它
 
-from backend.config import get_settings               # 读配置（API Key、base_url 等）
 from backend.core.logger import get_logger            # 结构化日志
+from backend.core.runtime_settings import get_runtime_settings
 
 logger = get_logger(__name__)                         # 本模块的日志器，name 用当前模块名
 
@@ -42,13 +42,6 @@ _AGENT_MODEL_ROUTING: dict[str, str] = {
 }
 
 
-# # 模型标识符（实际模型） → DeepSeek API 实际接受的 model 名称
-_MODEL_ID_MAP: dict[str, str] = {
-    "deepseek-chat": "deepseek-v4-flash-vision-exp",
-}
-# 这里的_MODEL_ID_MAP键对应模型的厂商，值是真实的模型
-
-
 class LLMFactory:
     """大模型工厂（统一获取模型的唯一入口）。
     用 @classmethod 定义方法，意味着不用创建对象、直接用 LLMFactory.get_llm(...) 调用。
@@ -62,22 +55,17 @@ class LLMFactory:
     _instances: dict[str, BaseChatModel] = {}   # 类变量：模型实例缓存（缓存键 → 模型），全类共享
 
     @classmethod
-    def _get_settings(cls):
-        """内部小工具：取配置对象。"""
-        return get_settings()
-
-    @classmethod
     def _build_model_kwargs(cls, model_key: str) -> dict[str, Any]:
         """内部方法：组装 init_chat_model 需要的所有参数（DeepSeek 走 OpenAI 兼容接口）。"""
-        settings = cls._get_settings()             # 取配置
-        model_id = _MODEL_ID_MAP[model_key]        # 把模型标识符转成 API 实际的 model 名
+        runtime_api = get_runtime_settings().api
+        model_id = runtime_api.llm_model
 
         return {
             "model": model_id,                     # 模型名，如 "deepseek-chat"
             "model_provider": "openai",            # 强制走 langchain-openai（DeepSeek 兼容 OpenAI 接口）
             "temperature": 0,                      # 默认 0：评分/批改要稳定输出
-            "api_key": settings.deepseek_api_key,  # 来自 .env.local
-            "base_url": settings.deepseek_base_url,# DeepSeek 接口地址
+            "api_key": runtime_api.deepseek_api_key,
+            "base_url": runtime_api.llm_base_url,
             "max_retries": 0,                      # 模型层不重试；重试统一由 retry.py（3.5）管
             # "http_async_client": _HTTP_ASYNC_CLIENT,  # 用上面绕过代理的异步客户端
             # "http_client": _HTTP_SYNC_CLIENT,         # 同步客户端
@@ -98,9 +86,13 @@ class LLMFactory:
                 f"可用类型：{list(_AGENT_MODEL_ROUTING.keys())}"
             )
         model_key = _AGENT_MODEL_ROUTING[agent_type]  # 查路由表，拿到模型标识符(模型厂商)
+        runtime_api = get_runtime_settings().api
         # print(f"model_key: {model_key}")
         # 用「模型_温度_是否流式」拼一个缓存键：不同组合各缓存一份
-        cache_key = f"{model_key}_{temperature}_{streaming}"
+        cache_key = (
+            f"{model_key}_{runtime_api.llm_model}_{runtime_api.llm_base_url}_"
+            f"{temperature}_{streaming}"
+        )
         # print(f"cache_key: {cache_key}")
         if cache_key not in cls._instances:  # 缓存里没有才新建
             # print(f"cache_key: {cache_key}")

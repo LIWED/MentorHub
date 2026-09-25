@@ -8,6 +8,8 @@
 .env.*.local
 *.env.local
 .env.production
+.runtime_settings.json
+.runtime_settings.json.tmp
 !.env.example
 !**/.env.example
 
