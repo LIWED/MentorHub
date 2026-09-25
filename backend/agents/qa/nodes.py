@@ -17,7 +17,8 @@ from backend.agents.qa.prompts import (
     RAG_STRATEGY_PROMPT,
     ITERATIVE_PLAN_PROMPT,
     ITERATIVE_EXPAND_PROMPT,
-    ITERATIVE_SUFFICIENCY_PROMPT,
+    SUFFICIENCY_PROMPT,
+    GAP_REWRITE_PROMPT,
     SYSTEM_PROMPT,
 )
 from backend.core.llm_factory import get_llm
@@ -38,11 +39,15 @@ logger = get_logger(__name__)
 MAX_BROAD_QUERIES        = 3   # BROAD 分支最多并行的子 Query 数
 MAX_ITERATIVE_QUESTIONS  = 3   # ITERATIVE：最多处理 3 个逻辑问题
 MAX_ITERATIONS           = 3   # ITERATIVE：最多 3 轮依赖检索
-RECALL_TOP_K_PRECISE     = 8   # PRECISE：直接检索召回数
-RECALL_TOP_K_VAGUE       = 10  # VAGUE：HyDE 语义扩充后多召回些
-RECALL_TOP_K_BROAD_PER   = 4   # BROAD：每个子 Query 的召回数
-RECALL_TOP_K_ITERATIVE   = 6   # ITERATIVE：每个展开 Query 的召回数
-RERANK_TOP_K             = 3   # 精排后保留的最终 chunk 数
+RECALL_TOP_K_SINGLE      = 20  # SINGLE：Hybrid 粗召回候选池
+RECALL_TOP_K_HYDE        = 20  # HyDE fallback：Hybrid 粗召回候选池
+RECALL_TOP_K_BROAD_PER   = 10  # BROAD：每个子 Query 的候选池
+RECALL_TOP_K_ITERATIVE   = 12  # ITERATIVE：每个展开 Query 的候选池
+RERANK_EVIDENCE_TOP_K    = 6   # 精排后供 Sufficiency 判断的证据窗口
+FINAL_CONTEXT_TOP_K      = 3   # 最终传给生成模型的 Context 数量
+MAX_GAP_QUERIES          = 2   # 每轮最多生成 2 个缺口检索 Query
+MAX_GAP_ROUNDS           = 2   # 最多补充检索 2 轮，避免 Agent 循环失控
+RETRIEVAL_CONFIDENCE_THRESHOLD = 0.75
 
 def _get_message_content(msg) -> str:
     """统一获取消息文本（兼容 .text 属性和 .content 属性）"""
@@ -155,14 +160,15 @@ _SPECIALIZED_KEYWORDS = (
     "第几章", "第几节", "训练营",
 )
 
-_VAGUE_QUERY_HINTS = (
+_SHORT_CONTEXT_HINTS = (
     "没懂", "不懂", "不太懂", "讲讲", "解释一下",
     "啥意思", "什么意思", "看不懂",
 )
 
 _BROAD_QUERY_HINTS = (
-    "全面", "系统", "总结", "梳理", "路线",
-    "对比", "区别", "全景", "有哪些",
+    "全面", "整体", "系统介绍", "系统讲", "总结", "梳理", "路线",
+    "对比", "区别", "全景", "整体介绍", "详细介绍",
+    "多个方面", "多方面",
 )
 
 
@@ -197,49 +203,44 @@ def _rule_classify_specialized(query: str) -> bool:
     return any(kw in q for kw in _SPECIALIZED_KEYWORDS)
 
 def _fast_rag_strategy(query: str) -> str:
-    """规则快判 RAG 策略（< 1ms）"""
+    """规则快判结构路由：SINGLE / BROAD / ITERATIVE。"""
     q = query.strip().lower()
     if _looks_iterative_query(q):
         return "ITERATIVE"
-    if len(q) <= 6 and any(kw in q for kw in _VAGUE_QUERY_HINTS):
-        return "VAGUE"
+    # 极短的“没懂/讲讲”等输入无法直接形成稳定检索意图，交给 Multi Query 展开。
+    if len(q) <= 6 and any(kw in q for kw in _SHORT_CONTEXT_HINTS):
+        return "BROAD"
     if any(kw in q for kw in _BROAD_QUERY_HINTS):
         return "BROAD"
-    return "PRECISE"
+    return "SINGLE"
 
 
 async def _determine_rag_strategy(query: str) -> str:
-    """LLM 精判 RAG 策略（仅在规则判为 VAGUE/BROAD 且问题较长时调用）"""
+    """LLM 对 BROAD / ITERATIVE 候选做结构确认；HyDE 不参与这里的分类。"""
     try:
         llm = get_llm("qa", temperature=0)
         resp = await llm.ainvoke([
             HumanMessage(content=RAG_STRATEGY_PROMPT.format(query=query))
         ])
         label = _get_message_content(resp).strip().upper()
-        if label in ("PRECISE", "VAGUE", "BROAD", "ITERATIVE"):
+        if label in ("SINGLE", "BROAD", "ITERATIVE"):
             return label
     except Exception as e:
-        logger.warning("classify_query.rag_strategy_failed", error=str(e))
-    return "PRECISE"   # 兜底：最保守策略
+        logger.warning("structural_router.strategy_failed", error=str(e))
+    return "SINGLE"
 
 
 async def _determine_rag_strategy_fast(query: str) -> str:
     """
-    两阶段策略判定：
-    ① 规则快判 → 若为 PRECISE，直接返回（不调 LLM）
-    ② 规则判为 VAGUE/BROAD 且问题较长（≥18字）→ LLM 校正（避免误判）
-    ③ 规则判为 VAGUE/BROAD 且问题极短 → 直接相信规则
+    两阶段结构路由：
+    ① 规则快判 SINGLE / BROAD / ITERATIVE；
+    ② SINGLE 直接返回，避免常规单点问题额外调用 LLM；
+    ③ BROAD / ITERATIVE 候选交给 LLM 校正结构，降低误判。
     """
     strategy = _fast_rag_strategy(query)
-    if strategy == "PRECISE":
+    if strategy == "SINGLE":
         return strategy
-    # ITERATIVE 的规则只作为候选提示，始终交给 LLM 确认依赖关系，
-    # 避免把“已知实体 + 分别询问”的并行问题误判成依赖式检索。
-    if strategy == "ITERATIVE":
-        return await _determine_rag_strategy(query)
-    if len(query.strip()) >= 18:
-        return await _determine_rag_strategy(query)
-    return strategy
+    return await _determine_rag_strategy(query)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -256,11 +257,11 @@ async def classify_query_node(state: QAState) -> dict:
 
     同时负责从 DB 加载当前会话的历史摘要（合并了源码中的 load_memory 节点）。
 
-    返回的 query_type：
-      GENERAL  → 跳过 RAG，直接 LLM 回答
-      PRECISE  → 直接向量检索
-      VAGUE    → 先 HyDE 再检索
-      BROAD    → 先 Multi-Query 改写再并行检索
+    这里只区分 GENERAL 与 specialized。
+    specialized 先进入 Query Rewrite，再由 structural_router_node 判断：
+      SINGLE / BROAD / ITERATIVE。
+
+    HyDE 不在这里做一级分类，而是在检索质量不足时作为 fallback。
     """
     # ── 取最后一条 HumanMessage 作为原始输入 ─────────────────
     messages = state.get("messages", [])
@@ -301,6 +302,16 @@ async def classify_query_node(state: QAState) -> dict:
         "iterative_queries": [],
         "iterative_results": [],
         "iteration_count": 0,
+        "ranked_chunks": [],
+        "evidence_pool": [],
+        "new_evidence": [],
+        "sufficient": False,
+        "missing_gaps": [],
+        "search_hints": [],
+        "gap_queries": [],
+        "gap_round": 0,
+        "max_gap_rounds": MAX_GAP_ROUNDS,
+        "fallback_used": False,
     }
     if auto_web and not state.get("enable_web_search", False):
         _base["enable_web_search"] = True
@@ -314,9 +325,8 @@ async def classify_query_node(state: QAState) -> dict:
         # ── Layer 0b：关键词快速通道 → 专业（课程/项目词）──────────
     if _rule_classify_specialized(original_query):
         logger.info("classify_query.specialized_by_keyword", query=original_query[:50])
-        strategy = await _determine_rag_strategy_fast(original_query)
-        logger.info("classify_query.rag_strategy", strategy=strategy)
-        return {**_base, "query_type": strategy}
+        # specialized 先统一进入 Rewrite；结构策略在 Rewrite 后判断。
+        return {**_base, "query_type": "SINGLE"}
     # ── Layer 1：MiniLM 二分类（CPU 推理，线程池避免阻塞）──────
     loop = asyncio.get_running_loop()
     label, confidence = await loop.run_in_executor(
@@ -330,15 +340,13 @@ async def classify_query_node(state: QAState) -> dict:
             confidence=round(confidence, 4),
         )
         return {**_base, "query_type": "GENERAL"}
-    # ── Layer 2：MiniLM → 专业，LLM 判检索策略 ──────────────
+    # ── Layer 2：MiniLM → 专业，先进入 Rewrite ─────────────────
     logger.info(
         "classify_query.specialized_by_minilm",
         query=original_query[:50],
         confidence=round(confidence, 4),
     )
-    strategy = await _determine_rag_strategy_fast(original_query)
-    logger.info("classify_query.rag_strategy", strategy=strategy)
-    return {**_base, "query_type": strategy}
+    return {**_base, "query_type": "SINGLE"}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -407,16 +415,35 @@ async def rewrite_query_node(state: QAState) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
-# 节点：hyde_generate — HyDE 假设文档生成（VAGUE 分支）
+# 节点：structural_router — Rewrite 后判断检索结构
+# ──────────────────────────────────────────────────────────────
+
+async def structural_router_node(state: QAState) -> dict:
+    """
+    只判断检索结构：SINGLE / BROAD / ITERATIVE。
+
+    HyDE 不属于结构路由；它由后续 Retrieval Quality Gate 决定是否触发。
+    """
+    query = state.get("rewritten_query") or state["original_query"]
+    strategy = await _determine_rag_strategy_fast(query)
+    logger.info(
+        "structural_router.done",
+        query=query[:100],
+        strategy=strategy,
+    )
+    return {"query_type": strategy}
+
+
+# ──────────────────────────────────────────────────────────────
+# 节点：hyde_generate — 低质量检索后的 HyDE fallback
 # ──────────────────────────────────────────────────────────────
 
 async def hyde_generate_node(state: QAState) -> dict:
     """
-    针对模糊 Query，让 LLM 先生成一段假设性回答文档，
-    用该文档的向量代替原始 Query 向量去检索。
+    Direct Retrieval 质量不足时，把 Query 转换为更接近知识库文档表达的
+    hypothetical document，再进行第二次检索。
 
-    temperature=0.3：生成结果要有一定多样性（覆盖更多语义），
-    但不能太随机（避免偏离主题）。
+    该节点只负责生成 HyDE 文本；真正的二次检索由 hyde_retrieve_node 完成。
     """
     query    = state.get("rewritten_query") or state["original_query"]
     messages = state.get("messages", [])
@@ -425,17 +452,23 @@ async def hyde_generate_node(state: QAState) -> dict:
 
     prompt = HYDE_PROMPT.format(history=history_text, query=query)
 
-    llm = get_llm("qa", temperature=0.3)
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    hyde_doc = _get_message_content(response).strip()
+    try:
+        llm = get_llm("qa", temperature=0.3)
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        hyde_doc = _get_message_content(response).strip()
+    except Exception as e:
+        # HyDE 是增强 fallback，不应因为生成失败把整条问答链路打断。
+        logger.warning("hyde_generate.failed", error=str(e))
+        return {"hyde_document": "", "fallback_used": True}
 
     logger.info(
         "hyde_generate.done",
-        query=query[:50],
+        query=query[:100],
         hyde_doc_length=len(hyde_doc),
+        hyde_document=hyde_doc,
     )
 
-    return {"hyde_document": hyde_doc}
+    return {"hyde_document": hyde_doc, "fallback_used": True}
 
 # ──────────────────────────────────────────────────────────────
 # 节点：multi_query_rewrite — Multi-Query 改写（BROAD 分支）
@@ -714,7 +747,7 @@ async def iterative_retrieve_node(state: QAState) -> dict:
                     tenant_id,
                     course_id,
                     recall_top_k=RECALL_TOP_K_ITERATIVE,
-                    rerank_top_k=RERANK_TOP_K,
+                    rerank_top_k=RERANK_EVIDENCE_TOP_K,
                 ),
             )
             return qid, docs
@@ -771,31 +804,11 @@ async def iterative_retrieve_node(state: QAState) -> dict:
         if question_scores else 0.0
     )
 
-    sufficiency_evidence = _format_iterative_evidence(
-        evidence_by_id,
-        [item["id"] for item in plan],
-        max_docs_per_question=2,
+    # 这里只做相关性质量判断；“证据是否足够回答完整问题”统一交给
+    # check_sufficiency_node，避免 Iterative 分支存在第二套 Sufficiency 逻辑。
+    is_high_confidence = bool(ranked_chunks) and (
+        confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
     )
-    is_high_confidence = False
-    if ranked_chunks:
-        try:
-            llm = get_llm("qa", temperature=0)
-            response = await llm.ainvoke([
-                HumanMessage(content=ITERATIVE_SUFFICIENCY_PROMPT.format(
-                    query=state["original_query"],
-                    plan=json.dumps(plan, ensure_ascii=False),
-                    evidence=sufficiency_evidence,
-                ))
-            ])
-            is_high_confidence = (
-                _get_message_content(response).strip().upper() == "SUFFICIENT"
-            )
-        except Exception as e:
-            logger.warning("iterative_sufficiency.failed", error=str(e))
-            # LLM 判定失败时保守回退：所有逻辑问题至少都有一条证据才允许 RAG。
-            is_high_confidence = all(
-                bool(evidence_by_id.get(item["id"])) for item in plan
-            )
 
     iterative_results = [
         {
@@ -819,10 +832,12 @@ async def iterative_retrieve_node(state: QAState) -> dict:
         entities=all_entities,
         queries=all_queries,
         confidence=round(confidence, 4),
-        sufficient=is_high_confidence,
+        is_high_confidence=is_high_confidence,
     )
     return {
         "ranked_chunks": ranked_chunks,
+        "evidence_pool": ranked_chunks,
+        "new_evidence": [],
         "confidence": confidence,
         "is_high_confidence": is_high_confidence,
         "iterative_entities": all_entities,
@@ -838,21 +853,19 @@ async def iterative_retrieve_node(state: QAState) -> dict:
 
 async def retrieve_node(state: QAState) -> dict:
     """
-    调用 retrieve() Pipeline 完成检索与精排，直接输出 ranked_chunks。
+    第一阶段 Direct Retrieval。
 
-    三条路径：
-      PRECISE → 用 original_query 直接检索
-      VAGUE   → 用 hyde_document 替代 original_query（语义扩充）
-      BROAD   → 对所有 rewritten_queries 并行检索，结果合并去重
+    SINGLE → 直接使用 rewritten_query 检索；
+    BROAD  → 多个子 Query 并行检索并合并去重。
 
-    retrieve() 是同步函数（BGE-M3 CPU 推理 + Milvus 阻塞 IO），
-    必须用 run_in_executor 包装，避免阻塞 asyncio 事件循环。
+    HyDE 不在这里作为一级分支；只有本次检索质量不足时才由图路由到
+    hyde_generate → hyde_retrieve 做第二次增强检索。
     """
-    from backend.core.reranker import retrieve, RankedDocument
+    from backend.core.reranker import BGEReranker, retrieve, RankedDocument
 
-    query_type     = state.get("query_type", "PRECISE").upper()
-    tenant_id      = state["tenant_id"]
-    course_id      = state.get("course_id")
+    query_type      = state.get("query_type", "SINGLE").upper()
+    tenant_id       = state["tenant_id"]
+    course_id       = state.get("course_id")
     original_query  = state["original_query"]
     rewritten_query = state.get("rewritten_query") or original_query
 
@@ -870,13 +883,13 @@ async def retrieve_node(state: QAState) -> dict:
                     tenant_id,
                     course_id,
                     recall_top_k=RECALL_TOP_K_BROAD_PER,
-                    rerank_top_k=RERANK_TOP_K,
+                    rerank_top_k=RERANK_EVIDENCE_TOP_K,
                 ),
             )
 
         results = await asyncio.gather(*[retrieve_one(q) for q in broad_queries])
-        # print(f'retrieve_one.results', results)
-        # 合并去重：content 前 100 字符为 key，同一内容保留最高分
+
+        # 合并去重：content 前 100 字符为 key，同一内容保留最高分。
         seen: dict[str, RankedDocument] = {}
         for ranked_docs, _ in results:
             for doc in ranked_docs:
@@ -884,31 +897,40 @@ async def retrieve_node(state: QAState) -> dict:
                 if key not in seen or doc.score > seen[key].score:
                     seen[key] = doc
 
-        merged = sorted(seen.values(), key=lambda x: x.score, reverse=True)[:RERANK_TOP_K]
-        # ── PRECISE / VAGUE：单路检索 ─────────────────────────────────
-    else:
-        if query_type == "VAGUE" and state.get("hyde_document"):
-            query_text = state["hyde_document"]
-            recall_top_k = RECALL_TOP_K_VAGUE
+        # 不直接比较不同 sub-query 下的 CrossEncoder 分数。
+        # 先合并各路候选，再用用户完整 Query 做一次全局精排。
+        broad_candidates = [
+            {
+                "content": doc.content,
+                "metadata": doc.metadata,
+            }
+            for doc in seen.values()
+        ]
+        if broad_candidates:
+            reranker = BGEReranker.get_instance()
+            merged, _ = await loop.run_in_executor(
+                None,
+                lambda: reranker.rerank_with_confidence(
+                    rewritten_query,
+                    broad_candidates,
+                    top_k=RERANK_EVIDENCE_TOP_K,
+                ),
+            )
         else:
-            query_text = rewritten_query
-            recall_top_k = RECALL_TOP_K_PRECISE
-
+            merged = []
+    else:
+        # SINGLE 以及其他安全兜底情况都先走原 Query / Rewrite Query 的直接检索。
         merged, _ = await loop.run_in_executor(
             None,
             lambda: retrieve(
-                query_text,
+                rewritten_query,
                 tenant_id,
                 course_id,
-                recall_top_k=recall_top_k,
-                rerank_top_k=RERANK_TOP_K,
+                recall_top_k=RECALL_TOP_K_SINGLE,
+                rerank_top_k=RERANK_EVIDENCE_TOP_K,
             ),
         )
 
-        # ── 转换 RankedDocument → dict，写入 State ─────────────────────
-
-    # print(f'merged: {merged}')
-    # print("*"*80)
     ranked_chunks = [
         {
             "content": doc.content,
@@ -919,7 +941,7 @@ async def retrieve_node(state: QAState) -> dict:
     ]
 
     confidence = ranked_chunks[0]["score"] if ranked_chunks else 0.0
-    is_high_confidence = confidence >= 0.75
+    is_high_confidence = confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
 
     logger.info(
         "retrieve.done",
@@ -930,6 +952,417 @@ async def retrieve_node(state: QAState) -> dict:
         is_high_confidence=is_high_confidence,
     )
 
+    return {
+        "ranked_chunks": ranked_chunks,
+        "evidence_pool": ranked_chunks,
+        "new_evidence": [],
+        "confidence": confidence,
+        "is_high_confidence": is_high_confidence,
+    }
+
+
+async def hyde_retrieve_node(state: QAState) -> dict:
+    """
+    第二阶段 HyDE Retrieval。
+
+    复用现有 retrieve()：
+    1. 使用 hypothetical document 做第二次检索；
+    2. 与第一次 Direct Retrieval 的结果合并去重；
+    3. 再使用真实 rewritten_query 做一次最终 Rerank；
+    4. 输出新的 Top-3 和置信度，供第二次 Quality Gate 判断。
+    """
+    from backend.core.reranker import BGEReranker, retrieve
+
+    hyde_document = (state.get("hyde_document") or "").strip()
+    if not hyde_document:
+        logger.info("hyde_retrieve.skipped", reason="empty_hyde_document")
+        return {
+            "is_high_confidence": False,
+            "fallback_used": True,
+        }
+
+    tenant_id       = state["tenant_id"]
+    course_id       = state.get("course_id")
+    original_query  = state["original_query"]
+    rewritten_query = state.get("rewritten_query") or original_query
+    loop = asyncio.get_running_loop()
+
+    hyde_docs, _ = await loop.run_in_executor(
+        None,
+        lambda: retrieve(
+            hyde_document,
+            tenant_id,
+            course_id,
+            recall_top_k=RECALL_TOP_K_HYDE,
+            rerank_top_k=RERANK_EVIDENCE_TOP_K,
+        ),
+    )
+
+    # 第一次 Direct Retrieval + HyDE Retrieval 合并去重。
+    evidence_pool: list[dict] = []
+    seen: set[str] = set()
+
+    for chunk in state.get("evidence_pool") or state.get("ranked_chunks", []):
+        content = chunk.get("content", "")
+        key = content[:160]
+        if content and key not in seen:
+            evidence_pool.append({
+                "content": content,
+                "score": chunk.get("score", 0.0),
+                "metadata": chunk.get("metadata", {}),
+            })
+            seen.add(key)
+
+    for doc in hyde_docs:
+        key = doc.content[:160]
+        if doc.content and key not in seen:
+            evidence_pool.append({
+                "content": doc.content,
+                "score": doc.score,
+                "metadata": doc.metadata,
+            })
+            seen.add(key)
+
+    if not evidence_pool:
+        return {
+            "ranked_chunks": [],
+            "evidence_pool": [],
+            "new_evidence": [],
+            "confidence": 0.0,
+            "is_high_confidence": False,
+            "fallback_used": True,
+        }
+
+    # HyDE 只负责扩大召回；最终排序重新回到真实 Query，降低假想答案偏移风险。
+    reranker = BGEReranker.get_instance()
+    final_docs, confidence = await loop.run_in_executor(
+        None,
+        lambda: reranker.rerank_with_confidence(
+            rewritten_query,
+            evidence_pool,
+            top_k=RERANK_EVIDENCE_TOP_K,
+        ),
+    )
+
+    ranked_chunks = [
+        {
+            "content": doc.content,
+            "score": doc.score,
+            "metadata": doc.metadata,
+        }
+        for doc in final_docs
+    ]
+    is_high_confidence = confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+
+    logger.info(
+        "hyde_retrieve.done",
+        query_type=state.get("query_type"),
+        direct_candidates=len(state.get("ranked_chunks", [])),
+        hyde_candidates=len(hyde_docs),
+        merged_candidates=len(evidence_pool),
+        ranked=len(ranked_chunks),
+        confidence=round(confidence, 4),
+        is_high_confidence=is_high_confidence,
+    )
+
+    return {
+        "ranked_chunks": ranked_chunks,
+        "evidence_pool": evidence_pool,
+        "new_evidence": [],
+        "confidence": confidence,
+        "is_high_confidence": is_high_confidence,
+        "fallback_used": True,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# P0：Evidence Sufficiency + Gap Retrieval
+# ──────────────────────────────────────────────────────────────
+
+def _chunk_identity(chunk: dict) -> str:
+    """优先用 document_id + chunk_index 去重；缺失时退回文本前缀。"""
+    metadata = chunk.get("metadata") or {}
+    document_id = metadata.get("document_id")
+    chunk_index = metadata.get("chunk_index")
+    if document_id not in (None, "") and chunk_index is not None:
+        return f"{document_id}:{chunk_index}"
+    return (chunk.get("content") or "")[:240]
+
+
+def _format_sufficiency_evidence(chunks: list[dict]) -> str:
+    """压缩 Evidence，避免 Sufficiency Judge 被过长上下文淹没。"""
+    if not chunks:
+        return "（无检索证据）"
+
+    parts: list[str] = []
+    for idx, chunk in enumerate(chunks[:RERANK_EVIDENCE_TOP_K], 1):
+        metadata = chunk.get("metadata") or {}
+        source = metadata.get("source_name") or "课程文档"
+        score = float(chunk.get("score") or 0.0)
+        content = (chunk.get("content") or "")[:1200]
+        parts.append(
+            f"【证据{idx}｜source={source}｜score={score:.4f}】\n{content}"
+        )
+    return "\n\n".join(parts)
+
+
+def _normalize_string_list(value, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        text_value = str(item).strip()
+        if text_value and text_value not in normalized:
+            normalized.append(text_value)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+async def check_sufficiency_node(state: QAState) -> dict:
+    """
+    判断“相关证据是否足够回答完整问题”。
+
+    注意：这不是相关性判断。相关性仍由 BGE Reranker + 0.75 阈值负责；
+    本节点只检查 Evidence Coverage，并输出缺口供下一轮定向检索。
+    """
+    ranked_chunks = state.get("ranked_chunks") or []
+    query = state["original_query"]
+    retrieval_query = state.get("rewritten_query") or query
+
+    if not ranked_chunks:
+        return {
+            "sufficient": False,
+            "missing_gaps": ["当前没有可用于回答问题的知识库证据"],
+            "search_hints": [retrieval_query],
+        }
+
+    try:
+        llm = get_llm("qa", temperature=0)
+        response = await llm.ainvoke([
+            HumanMessage(content=SUFFICIENCY_PROMPT.format(
+                query=query,
+                retrieval_query=retrieval_query,
+                evidence=_format_sufficiency_evidence(ranked_chunks),
+            ))
+        ])
+        data = _parse_json_object(_get_message_content(response))
+
+        raw_sufficient = data.get("sufficient", False)
+        sufficient = (
+            raw_sufficient
+            if isinstance(raw_sufficient, bool)
+            else str(raw_sufficient).strip().lower() in {"true", "yes", "sufficient"}
+        )
+        missing_gaps = _normalize_string_list(
+            data.get("missing_gaps"),
+            limit=MAX_GAP_QUERIES,
+        )
+        search_hints = _normalize_string_list(
+            data.get("search_hints"),
+            limit=MAX_GAP_QUERIES,
+        )
+
+        if sufficient:
+            missing_gaps = []
+            search_hints = []
+        elif not missing_gaps:
+            missing_gaps = ["当前证据未完整覆盖用户问题的主要信息需求"]
+
+        logger.info(
+            "sufficiency.done",
+            sufficient=sufficient,
+            evidence_count=len(ranked_chunks),
+            missing_gaps=missing_gaps,
+            gap_round=state.get("gap_round", 0),
+        )
+        return {
+            "sufficient": sufficient,
+            "missing_gaps": missing_gaps,
+            "search_hints": search_hints,
+        }
+    except Exception as e:
+        # Judge 本身失败时采用 fail-open：沿用已通过相关性 Gate 的证据，
+        # 避免外部 LLM/JSON 波动把原本可用的 RAG 链路阻断。
+        logger.warning("sufficiency.failed", error=str(e))
+        return {
+            "sufficient": bool(state.get("is_high_confidence", False)),
+            "missing_gaps": [],
+            "search_hints": [],
+        }
+
+
+async def gap_rewrite_node(state: QAState) -> dict:
+    """只针对 Sufficiency Judge 指出的缺口生成最多 2 个补充检索 Query。"""
+    query = state["original_query"]
+    missing_gaps = state.get("missing_gaps") or []
+    search_hints = state.get("search_hints") or []
+
+    try:
+        llm = get_llm("qa", temperature=0)
+        response = await llm.ainvoke([
+            HumanMessage(content=GAP_REWRITE_PROMPT.format(
+                query=query,
+                missing_gaps=json.dumps(missing_gaps, ensure_ascii=False),
+                search_hints=json.dumps(search_hints, ensure_ascii=False),
+            ))
+        ])
+        data = _parse_json_object(_get_message_content(response))
+        gap_queries = _normalize_string_list(
+            data.get("queries"),
+            limit=MAX_GAP_QUERIES,
+        )
+    except Exception as e:
+        logger.warning("gap_rewrite.failed", error=str(e))
+        gap_queries = []
+
+    if not gap_queries:
+        gap_queries = _normalize_string_list(
+            [*search_hints, *missing_gaps],
+            limit=MAX_GAP_QUERIES,
+        )
+    if not gap_queries:
+        gap_queries = [state.get("rewritten_query") or query]
+
+    logger.info(
+        "gap_rewrite.done",
+        gap_round=state.get("gap_round", 0) + 1,
+        queries=gap_queries,
+    )
+    return {"gap_queries": gap_queries}
+
+
+async def gap_retrieve_node(state: QAState) -> dict:
+    """复用现有 Hybrid Retrieval，对缺口 Query 做定向补充召回。"""
+    from backend.core.reranker import retrieve
+
+    gap_queries = (state.get("gap_queries") or [])[:MAX_GAP_QUERIES]
+    tenant_id = state["tenant_id"]
+    course_id = state.get("course_id")
+    loop = asyncio.get_running_loop()
+    next_round = int(state.get("gap_round", 0)) + 1
+
+    async def retrieve_one(search_query: str):
+        docs, _ = await loop.run_in_executor(
+            None,
+            lambda: retrieve(
+                search_query,
+                tenant_id,
+                course_id,
+                recall_top_k=RECALL_TOP_K_SINGLE,
+                rerank_top_k=RERANK_EVIDENCE_TOP_K,
+            ),
+        )
+        return search_query, docs
+
+    results = await asyncio.gather(*[
+        retrieve_one(search_query)
+        for search_query in gap_queries
+    ]) if gap_queries else []
+
+    seen: set[str] = set()
+    new_evidence: list[dict] = []
+    for search_query, docs in results:
+        for doc in docs:
+            chunk = {
+                "content": doc.content,
+                "score": doc.score,
+                "metadata": doc.metadata,
+                "trigger_query": search_query,
+                "retrieval_round": next_round,
+            }
+            key = _chunk_identity(chunk)
+            if key and key not in seen:
+                new_evidence.append(chunk)
+                seen.add(key)
+
+    logger.info(
+        "gap_retrieve.done",
+        gap_round=next_round,
+        queries=gap_queries,
+        new_evidence=len(new_evidence),
+    )
+    return {
+        "new_evidence": new_evidence,
+        "gap_round": next_round,
+    }
+
+
+async def merge_evidence_node(state: QAState) -> dict:
+    """把旧 Evidence 与 Gap Retrieval 新证据合并去重，保留完整证据池。"""
+    old_evidence = state.get("evidence_pool") or state.get("ranked_chunks") or []
+    new_evidence = state.get("new_evidence") or []
+
+    merged_by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for chunk in [*old_evidence, *new_evidence]:
+        key = _chunk_identity(chunk)
+        if not key:
+            continue
+        if key not in merged_by_key:
+            merged_by_key[key] = chunk
+            order.append(key)
+        elif float(chunk.get("score") or 0.0) > float(
+            merged_by_key[key].get("score") or 0.0
+        ):
+            # 这里只用于同一 Chunk 去重；随后还会用原始 Query 做全局 Rerank。
+            merged_by_key[key] = chunk
+
+    evidence_pool = [merged_by_key[key] for key in order]
+    logger.info(
+        "merge_evidence.done",
+        old=len(old_evidence),
+        new=len(new_evidence),
+        merged=len(evidence_pool),
+    )
+    return {
+        "evidence_pool": evidence_pool,
+        "new_evidence": [],
+    }
+
+
+async def rerank_evidence_node(state: QAState) -> dict:
+    """用真实用户 Query 对累计 Evidence Pool 做全局重排。"""
+    from backend.core.reranker import BGEReranker
+
+    evidence_pool = state.get("evidence_pool") or []
+    if not evidence_pool:
+        return {
+            "ranked_chunks": [],
+            "confidence": 0.0,
+            "is_high_confidence": False,
+        }
+
+    query = state.get("rewritten_query") or state["original_query"]
+    loop = asyncio.get_running_loop()
+    reranker = BGEReranker.get_instance()
+    docs, confidence = await loop.run_in_executor(
+        None,
+        lambda: reranker.rerank_with_confidence(
+            query,
+            evidence_pool,
+            top_k=RERANK_EVIDENCE_TOP_K,
+        ),
+    )
+    ranked_chunks = [
+        {
+            "content": doc.content,
+            "score": doc.score,
+            "metadata": doc.metadata,
+        }
+        for doc in docs
+    ]
+    is_high_confidence = bool(ranked_chunks) and (
+        confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+    )
+
+    logger.info(
+        "rerank_evidence.done",
+        evidence_pool=len(evidence_pool),
+        ranked=len(ranked_chunks),
+        confidence=round(confidence, 4),
+        is_high_confidence=is_high_confidence,
+    )
     return {
         "ranked_chunks": ranked_chunks,
         "confidence": confidence,
@@ -947,7 +1380,9 @@ async def generate_rag_node(state: QAState) -> dict:
     将精排后的 Top-3 文档拼成 context，让 LLM 严格基于知识库内容回答。
     回答末尾附加 📚 参考来源，支持历史摘要注入保持多轮连贯性。
     """
-    ranked_chunks = state.get("ranked_chunks", [])
+    # Sufficiency 判断可以看更宽的 Top-6 证据窗口；真正生成时只保留
+    # Final Context Top-K，减少噪音和上下文成本。
+    ranked_chunks = (state.get("ranked_chunks") or [])[:FINAL_CONTEXT_TOP_K]
     query         = state["original_query"]
     messages      = state.get("messages", [])
     summary       = state.get("existing_summary")
@@ -1347,7 +1782,7 @@ if __name__ == '__main__':
     # 一定开启mcp server服务（new_main.py运行）
     # results3 = asyncio.run(web_search_node(state))
     # # print(f'results3={results3}')
-    # state = {"query_type":"PRECISE",
+    # state = {"query_type":"SINGLE",
     #          "original_query":"什么是AI",
     #          "tenant_id":"tenant_default",}
     # #
@@ -1360,11 +1795,11 @@ if __name__ == '__main__':
     # # print(results4)
     # results5 = asyncio.run(generate_general_node(state))
     # print(results5)
-    # state = {"query_type": "PRECISE",
+    # state = {"query_type": "SINGLE",
     #          "original_query": "什么是AI",
     #          "tenant_id": "tenant_default", }
     # # state.update(web_search_results)
-    # state = {"query_type": "PRECISE",
+    # state = {"query_type": "SINGLE",
     #          "original_query": "AI和JAVA有什么区别和联系",
     #          "tenant_id": "tenant_default",
     #          "student_id":"1efe1246-e355-4714-8b1b-bd4e7c8bce51", #必须在users库中出现

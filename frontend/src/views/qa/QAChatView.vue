@@ -59,6 +59,7 @@
           :sources="msg.sources"
         >
           <MarkdownRenderer :content="msg.content" />
+          <QATimingDetails v-if="msg.timing" :timing="msg.timing" />
         </ChatBubble>
 
         <!-- 流式气泡：isStreaming 期间始终显示 -->
@@ -155,8 +156,10 @@ import { v4 as uuidv4 } from 'uuid'
 import { ElMessage } from 'element-plus'
 import ChatBubble from '@/components/chat/ChatBubble.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
+import QATimingDetails from '@/components/qa/QATimingDetails.vue'
 import { useAuthStore } from '@/stores/auth'
 import { qaApi } from '@/api/qa'
+import type { QATiming } from '@/api/qa'
 import { useResizableInput } from '@/composables/useResizableInput'
 import iconQa from '@/assets/images/icon_qa.jpg'
 
@@ -172,6 +175,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: string[]
+  timing?: QATiming
 }
 
 interface Session {
@@ -197,6 +201,7 @@ const progressStage = ref('')
 const lastAnswerMode = ref('')
 const lastConfidence = ref(0)
 const lastSources = ref<string[]>([])
+const lastTiming = ref<QATiming | undefined>()
 
 // Web Search 开关
 const webSearchEnabled = ref(true)
@@ -309,6 +314,7 @@ async function sendMessage() {
   progressStage.value = ''
   lastAnswerMode.value = ''
   lastSources.value = []
+  lastTiming.value = undefined
 
   try {
     const resp = await fetch(`${API_BASE}/api/v1/qa/chat/stream`, {
@@ -361,6 +367,7 @@ async function sendMessage() {
             lastAnswerMode.value = evt.answer_mode ?? ''
             lastConfidence.value = Math.round((evt.confidence ?? 0) * 100)
             lastSources.value = evt.sources ?? []
+            lastTiming.value = evt.timing ?? undefined
           } else if (evt.type === 'error') {
             throw new Error(evt.message ?? 'SSE error')
           }
@@ -375,6 +382,7 @@ async function sendMessage() {
         role: 'assistant',
         content: streamingText.value,
         sources: lastSources.value,
+        timing: lastTiming.value,
       }
       messages.value.push(assistantMsg)
     }

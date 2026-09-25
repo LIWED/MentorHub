@@ -61,11 +61,14 @@ _GUIDANCE = {
 # ── QA Agent 节点进度提示（与 qa.py 保持一致，8.5 用到）────────
 _PROGRESS_LABELS = {
     "classify_query":        "理解问题中...",
-    "load_memory_and_embed": "检索知识库...",
-    "retrieve":              "召回相关文档...",
-    "rerank":                "精排中...",
-    "hyde_generate":         "理解问题中...",
+    "structural_router":     "选择检索策略...",
     "multi_query_rewrite":   "改写查询中...",
+    "iterative_plan":        "规划检索步骤...",
+    "retrieve":              "召回相关文档...",
+    "iterative_retrieve":    "分步检索中...",
+    "hyde_generate":         "增强检索表达...",
+    "hyde_retrieve":         "二次检索中...",
+    "web_search":            "搜索互联网...",
     "generate_general":      "思考中...",
 }
 _GENERATE_NODES = {"generate_rag", "generate_direct", "generate_general"}  # QA 的三个生成节点
@@ -414,7 +417,7 @@ async def _stream_qa_agent(req: UnifiedChatRequest, current_user: dict):
         "tenant_id":  current_user["tenant_id"],
         "session_id": req.session_id,
         "course_id":  None,
-        "query_type": "PRECISE",                             # QA 的查询类型（见第 5 章）
+        "query_type": "SINGLE",                             # QA 的查询类型（见第 5 章）
     }
     config = {"configurable": {"thread_id": thread_id}}
 
