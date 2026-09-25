@@ -82,6 +82,12 @@ const router = createRouter({
           component: () => import('@/views/teacher/KnowledgePendingView.vue'),
           meta: { requiresTeacher: true },
         },
+        {
+          path: 'settings',
+          name: 'settings',
+          component: () => import('@/views/SettingsView.vue'),
+          meta: { requiresAdmin: true },
+        },
       ],
     },
     {
@@ -102,6 +108,7 @@ router.beforeEach((to, _from, next) => {
   if (!auth.isLoggedIn) return next('/login')
 
   if (to.meta.requiresTeacher && !auth.isTeacher) return next('/dashboard')
+  if (to.meta.requiresAdmin && !auth.isAdmin) return next('/dashboard')
 
   next()
 })

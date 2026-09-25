@@ -43,7 +43,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("app.migrations_failed | error=%s", e)   # 迁移失败只告警，不拦启动
 
-    # ② 并行预热三个本地模型（首次加载慢，提前热好，避免首个请求卡顿）
+    # ② 预热三个本地模型（首次加载慢，提前热好，避免首个请求卡顿）
+    # 注意：BGE-M3 加载期间会临时 patch transformers 的 XLMRobertaModel，
+    # 而 Reranker 本身也是 XLM-R。两者不能并发初始化，否则可能出现
+    # meta tensor / 权重未物化等非线程安全加载状态。
     import asyncio
     try:
         from backend.core.reranker import BGEReranker            # 重排序模型（5.8）
@@ -51,11 +54,11 @@ async def lifespan(app: FastAPI):
         from backend.core.knowledge_base import BGEMEmbedder      # BGE-M3 嵌入（5.4）
 
         loop = asyncio.get_running_loop()
-        await asyncio.gather(                                    # 三个模型并行加载（各跑在线程池里）
-            loop.run_in_executor(None, BGEReranker.get_instance),
-            loop.run_in_executor(None, QueryClassifier.get_instance),
-            loop.run_in_executor(None, BGEMEmbedder.get_instance),
-        )
+        # 顺序加载，优先完成 Reranker，再加载会临时 patch XLM-R 的 BGE-M3。
+        # 仍放在线程池，避免阻塞事件循环本身。
+        await loop.run_in_executor(None, BGEReranker.get_instance)
+        await loop.run_in_executor(None, BGEMEmbedder.get_instance)
+        await loop.run_in_executor(None, QueryClassifier.get_instance)
         logger.info("app.local_models_warmed_up")
     except Exception as e:
         logger.warning("app.local_models_warmup_failed | error=%s", e)  # 预热失败也不拦启动

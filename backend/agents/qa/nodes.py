@@ -32,6 +32,7 @@ from backend.core.memory import (
 from backend.config import get_settings
 from backend.core.logger import get_logger
 from backend.core.query_classifier import get_query_classifier
+from backend.core.runtime_settings import get_runtime_settings
 
 logger = get_logger(__name__)
 
@@ -39,15 +40,11 @@ logger = get_logger(__name__)
 MAX_BROAD_QUERIES        = 3   # BROAD 分支最多并行的子 Query 数
 MAX_ITERATIVE_QUESTIONS  = 3   # ITERATIVE：最多处理 3 个逻辑问题
 MAX_ITERATIONS           = 3   # ITERATIVE：最多 3 轮依赖检索
-RECALL_TOP_K_SINGLE      = 20  # SINGLE：Hybrid 粗召回候选池
-RECALL_TOP_K_HYDE        = 20  # HyDE fallback：Hybrid 粗召回候选池
-RECALL_TOP_K_BROAD_PER   = 10  # BROAD：每个子 Query 的候选池
-RECALL_TOP_K_ITERATIVE   = 12  # ITERATIVE：每个展开 Query 的候选池
-RERANK_EVIDENCE_TOP_K    = 6   # 精排后供 Sufficiency 判断的证据窗口
-FINAL_CONTEXT_TOP_K      = 3   # 最终传给生成模型的 Context 数量
-MAX_GAP_QUERIES          = 2   # 每轮最多生成 2 个缺口检索 Query
-MAX_GAP_ROUNDS           = 2   # 最多补充检索 2 轮，避免 Agent 循环失控
-RETRIEVAL_CONFIDENCE_THRESHOLD = 0.75
+
+
+def _qa_runtime():
+    """每个节点执行时读取最新 QA 运行参数，使设置页修改无需重启即可生效。"""
+    return get_runtime_settings().qa
 
 def _get_message_content(msg) -> str:
     """统一获取消息文本（兼容 .text 属性和 .content 属性）"""
@@ -310,7 +307,7 @@ async def classify_query_node(state: QAState) -> dict:
         "search_hints": [],
         "gap_queries": [],
         "gap_round": 0,
-        "max_gap_rounds": MAX_GAP_ROUNDS,
+        "max_gap_rounds": _qa_runtime().max_gap_rounds,
         "fallback_used": False,
     }
     if auto_web and not state.get("enable_web_search", False):
@@ -746,8 +743,8 @@ async def iterative_retrieve_node(state: QAState) -> dict:
                     search_query,
                     tenant_id,
                     course_id,
-                    recall_top_k=RECALL_TOP_K_ITERATIVE,
-                    rerank_top_k=RERANK_EVIDENCE_TOP_K,
+                    recall_top_k=_qa_runtime().recall_top_k_iterative,
+                    rerank_top_k=_qa_runtime().rerank_evidence_top_k,
                 ),
             )
             return qid, docs
@@ -807,7 +804,7 @@ async def iterative_retrieve_node(state: QAState) -> dict:
     # 这里只做相关性质量判断；“证据是否足够回答完整问题”统一交给
     # check_sufficiency_node，避免 Iterative 分支存在第二套 Sufficiency 逻辑。
     is_high_confidence = bool(ranked_chunks) and (
-        confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+        confidence >= _qa_runtime().retrieval_confidence_threshold
     )
 
     iterative_results = [
@@ -882,8 +879,8 @@ async def retrieve_node(state: QAState) -> dict:
                     sub_query,
                     tenant_id,
                     course_id,
-                    recall_top_k=RECALL_TOP_K_BROAD_PER,
-                    rerank_top_k=RERANK_EVIDENCE_TOP_K,
+                    recall_top_k=_qa_runtime().recall_top_k_broad_per,
+                    rerank_top_k=_qa_runtime().rerank_evidence_top_k,
                 ),
             )
 
@@ -913,7 +910,7 @@ async def retrieve_node(state: QAState) -> dict:
                 lambda: reranker.rerank_with_confidence(
                     rewritten_query,
                     broad_candidates,
-                    top_k=RERANK_EVIDENCE_TOP_K,
+                    top_k=_qa_runtime().rerank_evidence_top_k,
                 ),
             )
         else:
@@ -926,8 +923,8 @@ async def retrieve_node(state: QAState) -> dict:
                 rewritten_query,
                 tenant_id,
                 course_id,
-                recall_top_k=RECALL_TOP_K_SINGLE,
-                rerank_top_k=RERANK_EVIDENCE_TOP_K,
+                recall_top_k=_qa_runtime().recall_top_k_single,
+                rerank_top_k=_qa_runtime().rerank_evidence_top_k,
             ),
         )
 
@@ -941,7 +938,7 @@ async def retrieve_node(state: QAState) -> dict:
     ]
 
     confidence = ranked_chunks[0]["score"] if ranked_chunks else 0.0
-    is_high_confidence = confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+    is_high_confidence = confidence >= _qa_runtime().retrieval_confidence_threshold
 
     logger.info(
         "retrieve.done",
@@ -993,8 +990,8 @@ async def hyde_retrieve_node(state: QAState) -> dict:
             hyde_document,
             tenant_id,
             course_id,
-            recall_top_k=RECALL_TOP_K_HYDE,
-            rerank_top_k=RERANK_EVIDENCE_TOP_K,
+            recall_top_k=_qa_runtime().recall_top_k_hyde,
+            rerank_top_k=_qa_runtime().rerank_evidence_top_k,
         ),
     )
 
@@ -1040,7 +1037,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
         lambda: reranker.rerank_with_confidence(
             rewritten_query,
             evidence_pool,
-            top_k=RERANK_EVIDENCE_TOP_K,
+            top_k=_qa_runtime().rerank_evidence_top_k,
         ),
     )
 
@@ -1052,7 +1049,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
         }
         for doc in final_docs
     ]
-    is_high_confidence = confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+    is_high_confidence = confidence >= _qa_runtime().retrieval_confidence_threshold
 
     logger.info(
         "hyde_retrieve.done",
@@ -1095,7 +1092,7 @@ def _format_sufficiency_evidence(chunks: list[dict]) -> str:
         return "（无检索证据）"
 
     parts: list[str] = []
-    for idx, chunk in enumerate(chunks[:RERANK_EVIDENCE_TOP_K], 1):
+    for idx, chunk in enumerate(chunks[:_qa_runtime().rerank_evidence_top_k], 1):
         metadata = chunk.get("metadata") or {}
         source = metadata.get("source_name") or "课程文档"
         score = float(chunk.get("score") or 0.0)
@@ -1156,11 +1153,11 @@ async def check_sufficiency_node(state: QAState) -> dict:
         )
         missing_gaps = _normalize_string_list(
             data.get("missing_gaps"),
-            limit=MAX_GAP_QUERIES,
+            limit=_qa_runtime().max_gap_queries,
         )
         search_hints = _normalize_string_list(
             data.get("search_hints"),
-            limit=MAX_GAP_QUERIES,
+            limit=_qa_runtime().max_gap_queries,
         )
 
         if sufficient:
@@ -1210,7 +1207,7 @@ async def gap_rewrite_node(state: QAState) -> dict:
         data = _parse_json_object(_get_message_content(response))
         gap_queries = _normalize_string_list(
             data.get("queries"),
-            limit=MAX_GAP_QUERIES,
+            limit=_qa_runtime().max_gap_queries,
         )
     except Exception as e:
         logger.warning("gap_rewrite.failed", error=str(e))
@@ -1219,7 +1216,7 @@ async def gap_rewrite_node(state: QAState) -> dict:
     if not gap_queries:
         gap_queries = _normalize_string_list(
             [*search_hints, *missing_gaps],
-            limit=MAX_GAP_QUERIES,
+            limit=_qa_runtime().max_gap_queries,
         )
     if not gap_queries:
         gap_queries = [state.get("rewritten_query") or query]
@@ -1236,7 +1233,7 @@ async def gap_retrieve_node(state: QAState) -> dict:
     """复用现有 Hybrid Retrieval，对缺口 Query 做定向补充召回。"""
     from backend.core.reranker import retrieve
 
-    gap_queries = (state.get("gap_queries") or [])[:MAX_GAP_QUERIES]
+    gap_queries = (state.get("gap_queries") or [])[:_qa_runtime().max_gap_queries]
     tenant_id = state["tenant_id"]
     course_id = state.get("course_id")
     loop = asyncio.get_running_loop()
@@ -1249,8 +1246,8 @@ async def gap_retrieve_node(state: QAState) -> dict:
                 search_query,
                 tenant_id,
                 course_id,
-                recall_top_k=RECALL_TOP_K_SINGLE,
-                rerank_top_k=RERANK_EVIDENCE_TOP_K,
+                recall_top_k=_qa_runtime().recall_top_k_single,
+                rerank_top_k=_qa_runtime().rerank_evidence_top_k,
             ),
         )
         return search_query, docs
@@ -1341,7 +1338,7 @@ async def rerank_evidence_node(state: QAState) -> dict:
         lambda: reranker.rerank_with_confidence(
             query,
             evidence_pool,
-            top_k=RERANK_EVIDENCE_TOP_K,
+            top_k=_qa_runtime().rerank_evidence_top_k,
         ),
     )
     ranked_chunks = [
@@ -1353,7 +1350,7 @@ async def rerank_evidence_node(state: QAState) -> dict:
         for doc in docs
     ]
     is_high_confidence = bool(ranked_chunks) and (
-        confidence >= RETRIEVAL_CONFIDENCE_THRESHOLD
+        confidence >= _qa_runtime().retrieval_confidence_threshold
     )
 
     logger.info(
@@ -1382,7 +1379,7 @@ async def generate_rag_node(state: QAState) -> dict:
     """
     # Sufficiency 判断可以看更宽的 Top-6 证据窗口；真正生成时只保留
     # Final Context Top-K，减少噪音和上下文成本。
-    ranked_chunks = (state.get("ranked_chunks") or [])[:FINAL_CONTEXT_TOP_K]
+    ranked_chunks = (state.get("ranked_chunks") or [])[:_qa_runtime().final_context_top_k]
     query         = state["original_query"]
     messages      = state.get("messages", [])
     summary       = state.get("existing_summary")

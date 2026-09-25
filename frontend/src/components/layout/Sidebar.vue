@@ -59,6 +59,32 @@
           </RouterLink>
         </el-tooltip>
       </template>
+
+      <template v-if="auth.isAdmin">
+        <div class="nav-divider">
+          <span v-show="!isCollapse" class="divider-label">系统</span>
+        </div>
+
+        <el-tooltip
+          v-for="item in adminNavItems"
+          :key="item.path"
+          :content="item.title"
+          placement="right"
+          :disabled="!isCollapse"
+        >
+          <RouterLink
+            :to="item.path"
+            class="nav-item"
+            :class="{ 'nav-item--active': isActive(item.path) }"
+          >
+            <div class="nav-icon-box">
+              <component :is="item.icon" />
+            </div>
+            <span v-show="!isCollapse" class="nav-label">{{ item.title }}</span>
+            <div v-if="isActive(item.path)" class="active-indicator" />
+          </RouterLink>
+        </el-tooltip>
+      </template>
     </nav>
   </div>
 </template>
@@ -67,7 +93,7 @@
 import { useRoute } from 'vue-router'
 import {
   House, ChatDotRound, Document, Postcard,
-  Microphone, EditPen, Collection,
+  Microphone, EditPen, Collection, Setting,
 } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import iconLogo from '@/assets/images/icon_logo.svg'
@@ -90,6 +116,10 @@ const studentNavItems = [
 const teacherNavItems = [
   { path: '/teacher/exam-review', title: '批改确认', icon: EditPen },
   { path: '/teacher/knowledge-pending', title: '知识库补充', icon: Collection },
+]
+
+const adminNavItems = [
+  { path: '/settings', title: '系统设置', icon: Setting },
 ]
 
 function isActive(prefix: string) {

@@ -42,12 +42,19 @@ class BGEMEmbedder:
                 kwargs.pop("dtype", None)
                 super().__init__(config, **kwargs)
 
-        _xlm.XLMRobertaModel = _PatchedXLMRobertaModel
+        # FlagEmbedding 1.4.x 与当前 transformers 组合需要兼容 dtype 参数，
+        # 但这个 monkey patch 只能在 BGE-M3 构造期间临时生效。
+        # Reranker 同样基于 XLM-R；如果长期保留全局替换，或与其并发加载，
+        # 会污染另一个模型的初始化路径。
+        try:
+            _xlm.XLMRobertaModel = _PatchedXLMRobertaModel
+            from FlagEmbedding import BGEM3FlagModel
 
-        from FlagEmbedding import BGEM3FlagModel
+            logger.info("bge_m3.loading", model_path=model_path)
+            self._model = BGEM3FlagModel(model_name_or_path=model_path, use_fp16=False)
+        finally:
+            _xlm.XLMRobertaModel = _OriginalXLMRoberta
 
-        logger.info("bge_m3.loading", model_path=model_path)
-        self._model = BGEM3FlagModel(model_name_or_path=model_path, use_fp16=False)
         self._encode_lock = threading.Lock()
         logger.info("bge_m3.loaded", use_fp16=False)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from langchain_core.messages import HumanMessage
 
@@ -78,10 +80,40 @@ async def test_single_retrieval_uses_wider_candidate_pool_and_evidence_window(mo
 
     result = await nodes.retrieve_node(_state())
 
-    assert captured["recall_top_k"] == nodes.RECALL_TOP_K_SINGLE == 20
-    assert captured["rerank_top_k"] == nodes.RERANK_EVIDENCE_TOP_K == 6
+    assert captured["recall_top_k"] == nodes._qa_runtime().recall_top_k_single == 20
+    assert captured["rerank_top_k"] == nodes._qa_runtime().rerank_evidence_top_k == 6
     assert len(result["ranked_chunks"]) == 6
     assert result["evidence_pool"] == result["ranked_chunks"]
+    assert result["is_high_confidence"] is True
+
+
+@pytest.mark.asyncio
+async def test_single_retrieval_reads_runtime_settings(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        nodes,
+        "_qa_runtime",
+        lambda: SimpleNamespace(
+            recall_top_k_single=31,
+            rerank_evidence_top_k=7,
+            retrieval_confidence_threshold=0.8,
+        ),
+    )
+
+    def fake_retrieve(query, tenant_id, course_id, *, recall_top_k, rerank_top_k):
+        captured["recall_top_k"] = recall_top_k
+        captured["rerank_top_k"] = rerank_top_k
+        docs = [_doc(f"d{i}", score=0.9 - i * 0.01) for i in range(rerank_top_k)]
+        return docs, 0.9
+
+    import backend.core.reranker as reranker
+    monkeypatch.setattr(reranker, "retrieve", fake_retrieve)
+
+    result = await nodes.retrieve_node(_state())
+
+    assert captured == {"recall_top_k": 31, "rerank_top_k": 7}
+    assert len(result["ranked_chunks"]) == 7
     assert result["is_high_confidence"] is True
 
 
@@ -203,4 +235,4 @@ async def test_generate_rag_uses_final_context_top_k(monkeypatch):
     prompt = llm.messages[-1].content
     assert "【参考3】" in prompt
     assert "【参考4】" not in prompt
-    assert len(result["sources"]) == nodes.FINAL_CONTEXT_TOP_K == 3
+    assert len(result["sources"]) == nodes._qa_runtime().final_context_top_k == 3
