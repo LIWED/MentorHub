@@ -10,6 +10,11 @@ from langchain_core.messages import HumanMessage, AIMessage
 from sqlalchemy import text as sa_text
 
 from backend.agents.qa.graph import build_qa_graph
+from backend.agents.qa.timing import (
+    build_timing_payload,
+    start_node_timing_collection,
+    stop_node_timing_collection,
+)
 from backend.core.memory import build_thread_id
 from backend.dependencies import get_current_user, AsyncSessionLocal
 from backend.core.logger import get_logger
@@ -237,7 +242,7 @@ async def chat(
         "tenant_id": current_user["tenant_id"],
         "session_id": req.session_id,
         "course_id": req.course_id,
-        "query_type": "PRECISE",
+        "query_type": "SINGLE",
         "enable_web_search": req.enable_web_search,
         "web_search_results": [],
     }
@@ -341,7 +346,7 @@ async def chat_stream(
         "tenant_id": current_user["tenant_id"],
         "session_id": req.session_id,
         "course_id": req.course_id,
-        "query_type": "PRECISE",
+        "query_type": "SINGLE",
         "enable_web_search": req.enable_web_search,
         "web_search_results": [],
     }
@@ -349,9 +354,13 @@ async def chat_stream(
     _GENERATE_NODES = {"generate_rag", "generate_direct", "generate_general"}
     _PROGRESS_LABELS = {
         "classify_query": "理解问题中...",
-        "hyde_generate": "理解问题中...",
+        "structural_router": "选择检索策略...",
         "multi_query_rewrite": "改写查询中...",
+        "iterative_plan": "规划检索步骤...",
         "retrieve": "召回相关文档...",
+        "iterative_retrieve": "分步检索中...",
+        "hyde_generate": "增强检索表达...",
+        "hyde_retrieve": "二次检索中...",
         "web_search": "搜索互联网...",
         "generate_general": "思考中...",
     }
@@ -363,6 +372,7 @@ async def chat_stream(
         answer_parts: list[str] = []
         first_token_seen = False
         graph_started = time.perf_counter()
+        node_timings, timing_token = start_node_timing_collection()
 
         try:
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
@@ -425,7 +435,10 @@ async def chat_stream(
                 )
             }
             return
+        finally:
+            stop_node_timing_collection(timing_token)
 
+        graph_ms = (time.perf_counter() - graph_started) * 1000
         answer_text = "".join(answer_parts).strip()
         if answer_text:
             try:
@@ -442,12 +455,19 @@ async def chat_stream(
             except Exception as e:
                 logger.warning("chat_stream.persist_assistant_failed", error=str(e))
 
+        total_ms = (time.perf_counter() - request_started) * 1000
+        timing_payload = build_timing_payload(
+            node_timings,
+            total_ms=total_ms,
+            graph_ms=graph_ms,
+        )
+
         logger.info(
             "qa.request_timing",
             mode="stream",
             status="ok",
-            graph_ms=round((time.perf_counter() - graph_started) * 1000, 2),
-            total_ms=round((time.perf_counter() - request_started) * 1000, 2),
+            graph_ms=round(graph_ms, 2),
+            total_ms=round(total_ms, 2),
             session_id=req.session_id,
             answer_mode=answer_mode,
         )
@@ -460,6 +480,7 @@ async def chat_stream(
                     "answer_mode": answer_mode,
                     "confidence": confidence,
                     "sources": sources,
+                    "timing": timing_payload,
                 },
                 ensure_ascii=False,
             )

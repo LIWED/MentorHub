@@ -1,5 +1,17 @@
 import client from './client'
 
+export interface QANodeTiming {
+  name: string
+  label: string
+  elapsed_ms: number
+}
+
+export interface QATiming {
+  total_ms: number
+  graph_ms: number
+  nodes: QANodeTiming[]
+}
+
 export interface ChatRequest {
   session_id: string
   course_id?: string | null

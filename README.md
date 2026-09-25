@@ -27,15 +27,15 @@ QA Agent 首先将问题区分为：
 - **General**：通用问题，直接由 LLM 回答；需要实时信息时可调用 Web Search。
 - **Specialized**：课程或专业知识问题，进入 RAG 检索链路。
 
-对于 Specialized Query，会进一步选择不同策略：
+对于 Specialized Query，先执行 **Query Rewrite** 补全多轮对话中的指代与省略，再由 Structural Router 判断检索结构：
 
-- **Precise Retrieval**：问题表达清晰时直接检索。
-- **Query Rewrite**：结合会话历史补全指代、省略信息。
-- **HyDE**：对语义模糊的问题生成 hypothetical document，再用于检索。
-- **Multi Query**：对宽泛、可独立拆分的问题生成最多 3 个子查询并行检索，提高召回覆盖率。
-- **Iterative Retrieval**：对存在前后依赖的问题先规划最多 3 个逻辑问题，再根据上一阶段检索证据展开下一阶段 Query，最多进行 3 轮受控依赖检索。
+- **SINGLE**：单一信息需求，直接使用 Rewrite Query 检索。
+- **BROAD / Multi Query**：多个可在检索前独立拆分的角度，最多生成 3 个子 Query 并行检索，再合并去重。
+- **ITERATIVE**：存在前后依赖的信息需求，先规划最多 3 个逻辑问题，再根据上一阶段证据展开下一阶段 Query，最多进行 3 轮受控依赖检索。
 
-其中 **BROAD / Multi Query** 处理的是“检索前就能独立拆开的多个子问题”，而 **ITERATIVE** 只用于“后一个问题依赖前一个问题检索结果”的场景，避免把所有复合问题都误判成多跳检索。
+**HyDE 不再作为一级 Query Type。** SINGLE / BROAD / ITERATIVE 完成第一次检索后统一进入 Retrieval Quality Gate；如果检索质量不足，则生成 hypothetical document 做第二次检索，并将 Direct Retrieval 与 HyDE Retrieval 结果合并、去重后重新用真实 Query 做 Rerank。HyDE 后仍不足时，再根据联网开关进入 Web Search 或 LLM Direct。
+
+其中 **BROAD / Multi Query** 解决“问题结构需要并行拆分”，**ITERATIVE** 解决“后续问题依赖上一轮证据”，而 **HyDE** 解决“Query 与知识库文档表达不匹配导致的低质量检索”，三者职责分离。
 
 ### Hybrid Retrieval
 
@@ -64,10 +64,10 @@ Query
 - Vector DB：**Milvus**
 - Fusion：`WeightedRanker(0.7, 0.3)`，Dense / BM25 权重分别为 0.7 / 0.3。
 - Reranker：本地配置模型优先（默认路径 `models/reranker/bge-reranker-large`），本地权重不可用时回退到 **BAAI/bge-reranker-v2-m3**。
-- Hybrid Recall：按策略动态设置，PRECISE=8、VAGUE=10、BROAD=每个子 Query 4、ITERATIVE=每个展开 Query 6。
+- Hybrid Recall：按结构动态设置，SINGLE=8、BROAD=每个子 Query 4、ITERATIVE=每个展开 Query 6；HyDE fallback 二次检索召回 10。
 - Rerank：默认保留 Top 3。
 
-PRECISE / VAGUE / BROAD 分支使用 Reranker Top-1 分数进行置信度判断，当前经验阈值为 **0.75**；低于阈值且开启联网搜索时进入 Web Search 兜底。ITERATIVE 分支则结合各逻辑问题证据，并由 LLM 进行 evidence sufficiency 判断。
+SINGLE / BROAD 的第一次检索使用 Reranker Top-1 分数进行置信度判断，当前经验阈值为 **0.75**；低于阈值先触发 HyDE 二次检索，而不是直接联网。ITERATIVE 分支仍结合各逻辑问题证据并通过 evidence sufficiency 判断；若整体证据不足，同样进入 HyDE fallback。HyDE 后仍不足时，再根据联网开关进入 Web Search 或 LLM Direct。
 
 ### 多轮记忆
 
