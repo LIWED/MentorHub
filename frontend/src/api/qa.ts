@@ -15,6 +15,7 @@ export interface QATiming {
 export interface ChatRequest {
   session_id: string
   course_id?: string | null
+  document_id?: string | null
   message: string
 }
 

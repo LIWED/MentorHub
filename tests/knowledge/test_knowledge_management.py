@@ -168,3 +168,60 @@ def test_document_delete_rebuilds_remaining_bm25(monkeypatch):
 
     assert events == ["delete:target", "upsert:1"]
     assert remaining[0].sparse_embedding
+
+
+def test_course_delete_rebuilds_remaining_bm25_once(monkeypatch):
+    from backend.core.knowledge_base import KnowledgeBaseClient
+
+    client = object.__new__(KnowledgeBaseClient)
+    remaining = [_chunk("other", "alpha beta")]
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        client,
+        "list_chunks",
+        lambda exclude_document_id=None, exclude_course_id=None: (
+            events.append(f"list:{exclude_course_id}") or remaining
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "delete_course_chunks",
+        lambda course_id, tenant_id: events.append(
+            f"delete:{tenant_id}:{course_id}"
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "upsert_chunks",
+        lambda chunks: events.append(f"upsert:{len(chunks)}") or len(chunks),
+    )
+
+    client.delete_course_and_rebuild("course-target", "tenant-default")
+
+    assert events == [
+        "list:course-target",
+        "delete:tenant-default:course-target",
+        "upsert:1",
+    ]
+    assert remaining[0].sparse_embedding
+
+
+def test_delete_course_chunks_is_tenant_scoped():
+    from backend.core.knowledge_base import KnowledgeBaseClient
+
+    calls: list[dict] = []
+
+    class _FakeMilvus:
+        def delete(self, **kwargs):
+            calls.append(kwargs)
+
+    client = object.__new__(KnowledgeBaseClient)
+    client._client = _FakeMilvus()
+
+    client.delete_course_chunks('course"1', 'tenant"1')
+
+    assert len(calls) == 1
+    assert calls[0]["collection_name"] == "knowledge_domain"
+    assert 'course_id == "course\\\"1"' in calls[0]["filter"]
+    assert 'tenant_id == "tenant\\\"1"' in calls[0]["filter"]

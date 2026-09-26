@@ -13,6 +13,7 @@ _node_timings: ContextVar[dict[str, float] | None] = ContextVar(
 NODE_LABELS: dict[str, str] = {
     "classify_query": "问题分类",
     "rewrite_query": "结合上下文改写问题",
+    "resolve_scope": "确定知识检索范围",
     "structural_router": "选择检索结构",
     "hyde_generate": "生成检索假设",
     "hyde_retrieve": "HyDE 二次检索与重排",

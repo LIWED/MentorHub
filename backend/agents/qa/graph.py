@@ -8,6 +8,7 @@ from backend.agents.qa.state import QAState
 from backend.agents.qa.nodes import (
     classify_query_node,
     rewrite_query_node,
+    resolve_scope_node,
     structural_router_node,
     hyde_generate_node,
     hyde_retrieve_node,
@@ -149,6 +150,7 @@ def build_qa_graph():
     # ── 注册节点 ──────────────────────────────────────────────
     builder.add_node("classify_query",       _timed_node("classify_query", classify_query_node))
     builder.add_node("rewrite_query",        _timed_node("rewrite_query", rewrite_query_node))
+    builder.add_node("resolve_scope",        _timed_node("resolve_scope", resolve_scope_node))
     builder.add_node("structural_router",    _timed_node("structural_router", structural_router_node))
     builder.add_node("hyde_generate",        _timed_node("hyde_generate", hyde_generate_node))
     builder.add_node("hyde_retrieve",        _timed_node("hyde_retrieve", hyde_retrieve_node))
@@ -182,8 +184,9 @@ def build_qa_graph():
         },
     )
 
-    # specialized 统一先 Rewrite，再判断结构路由。
-    builder.add_edge("rewrite_query", "structural_router")
+    # specialized 统一先 Rewrite，再确定 metadata scope，最后判断结构路由。
+    builder.add_edge("rewrite_query", "resolve_scope")
+    builder.add_edge("resolve_scope", "structural_router")
     builder.add_conditional_edges(
         "structural_router",
         lambda state: state.get("query_type", "SINGLE").upper(),

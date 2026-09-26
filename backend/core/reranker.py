@@ -169,6 +169,8 @@ def retrieve(
     course_id: Optional[str] = None,
     recall_top_k: int = 10,
     rerank_top_k: int = 3,
+    *,
+    metadata_scope: Optional[dict] = None,
 ) -> tuple[list[RankedDocument], float]:
     """
     Hybrid 召回 → BGE 精排一体化 Pipeline。
@@ -179,6 +181,7 @@ def retrieve(
         query:        用户 Query 文本
         tenant_id:    租户 ID（Milvus 过滤条件）
         course_id:    课程 ID（可选，进一步缩小检索范围）
+        metadata_scope: 统一 metadata 范围，可包含 course_id/document_id/chapter 等
         recall_top_k: Hybrid 召回数量（默认 10，送给精排）
         rerank_top_k: 精排后返回数量（默认 3，送给 LLM）
 
@@ -195,7 +198,11 @@ def retrieve(
 
     # ── 第二步：Hybrid 召回 ─────────────────────────────────────────
     kb = KnowledgeBaseClient()
-    filters = kb._build_filter(tenant_id, course_id)
+    filters = kb._build_filter(
+        tenant_id,
+        course_id,
+        metadata_scope=metadata_scope,
+    )
     candidates = kb._hybrid_search(
         query_text=query,
         query_embedding=dense_vec,

@@ -46,6 +46,23 @@
               <p>{{ selectedCourse.description || '暂无课程描述' }}</p>
             </div>
             <div class="detail-actions">
+              <el-tooltip
+                :disabled="!hasProcessingDocuments"
+                content="课程下有文档正在上传或解析，完成后才能删除课程"
+                placement="top"
+              >
+                <span>
+                  <el-button
+                    type="danger"
+                    plain
+                    :loading="deletingCourse"
+                    :disabled="hasProcessingDocuments || uploading"
+                    @click="removeCourse"
+                  >
+                    删除课程
+                  </el-button>
+                </span>
+              </el-tooltip>
               <el-button @click="openFilePicker">上传文件</el-button>
               <el-button type="primary" @click="openFolderPicker">上传文件夹</el-button>
               <el-button circle :loading="documentsLoading" @click="refreshSelectedCourse">
@@ -228,6 +245,7 @@ const coursesLoading = ref(false)
 const documentsLoading = ref(false)
 const uploading = ref(false)
 const creating = ref(false)
+const deletingCourse = ref(false)
 const createDialogVisible = ref(false)
 const fileInput = ref<HTMLInputElement>()
 const folderInput = ref<HTMLInputElement>()
@@ -237,6 +255,11 @@ let pollTimer: number | undefined
 
 const selectedCourse = computed(
   () => courses.value.find(item => item.id === selectedCourseId.value) ?? null,
+)
+const hasProcessingDocuments = computed(
+  () => documents.value.some(
+    item => item.status === 'uploaded' || item.status === 'parsing',
+  ),
 )
 
 function statusText(status: KnowledgeDocumentStatus) {
@@ -325,6 +348,46 @@ async function createCourse() {
     ElMessage.success('课程已创建')
   } finally {
     creating.value = false
+  }
+}
+
+async function removeCourse() {
+  const course = selectedCourse.value
+  if (!course || deletingCourse.value) return
+
+  await ElMessageBox.confirm(
+    `删除“${course.name}”后，将同时删除该课程下的 ${course.document_count} 个文档、全部向量 Chunk 和上传的资源文件。此操作不可恢复。`,
+    '删除课程及全部文档',
+    {
+      confirmButtonText: '确认全部删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      distinguishCancelAndClose: true,
+    },
+  )
+
+  deletingCourse.value = true
+  try {
+    await knowledgeApi.deleteCourse(course.id)
+
+    const deletedIndex = courses.value.findIndex(item => item.id === course.id)
+    if (deletedIndex >= 0) {
+      courses.value.splice(deletedIndex, 1)
+    }
+    selectedCourseId.value = ''
+    documents.value = []
+
+    const nextCourse = courses.value[Math.min(
+      Math.max(deletedIndex, 0),
+      Math.max(courses.value.length - 1, 0),
+    )]
+    if (nextCourse) {
+      await selectCourse(nextCourse.id)
+    }
+
+    ElMessage.success('课程及其全部文档已删除')
+  } finally {
+    deletingCourse.value = false
   }
 }
 

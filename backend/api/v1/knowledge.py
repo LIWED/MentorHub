@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -180,6 +181,8 @@ def _run_pipeline_sync(
     course_id: str,
     document_id: str,
     tenant_id: str,
+    document_type: str,
+    relative_path: str,
 ) -> dict:
     # BM25 当前按全库重建；串行化写入，避免两个后台 ingestion 同时覆盖稀疏权重。
     with _index_lock:
@@ -193,6 +196,8 @@ def _run_pipeline_sync(
                 document_id=document_id,
                 tenant_id=tenant_id,
                 use_context=False,
+                document_type=document_type,
+                relative_path=relative_path,
             )
         )
 
@@ -221,7 +226,7 @@ async def _ingest_document(document_id: str, tenant_id: str) -> None:
         result = await session.execute(
             text(
                 """
-                SELECT id, course_id, storage_path
+                SELECT id, course_id, storage_path, file_type, relative_path
                 FROM knowledge_documents
                 WHERE id = :document_id AND tenant_id = :tenant_id
                 """
@@ -250,6 +255,8 @@ async def _ingest_document(document_id: str, tenant_id: str) -> None:
             course_id=str(row["course_id"]),
             document_id=str(row["id"]),
             tenant_id=tenant_id,
+            document_type=row["file_type"],
+            relative_path=row["relative_path"],
         )
     except Exception as exc:
         logger.error(
@@ -315,6 +322,68 @@ def _start_ingestion(document_ids: list[str], tenant_id: str) -> None:
             )
 
     task.add_done_callback(_done)
+
+
+async def recover_interrupted_ingestion() -> dict[str, int]:
+    """
+    后端启动时恢复被 reload / 崩溃打断的知识入库任务。
+
+    当前 ingestion 使用进程内 asyncio task：进程退出后任务本身无法保存，
+    但 PostgreSQL 中的 Document 状态会保留。因此启动时把遗留的 parsing
+    重置为 uploaded，再把所有 uploaded 文档按租户重新排队即可继续处理。
+    completed / failed 不会自动重跑。
+    """
+    async with AsyncSessionLocal() as session:
+        stale_result = await session.execute(
+            text(
+                """
+                UPDATE knowledge_documents
+                SET status = 'uploaded',
+                    error_msg = NULL,
+                    updated_at = NOW()
+                WHERE status = 'parsing'
+                RETURNING id
+                """
+            )
+        )
+        stale_count = len(stale_result.fetchall())
+
+        queued_result = await session.execute(
+            text(
+                """
+                SELECT id, tenant_id
+                FROM knowledge_documents
+                WHERE status = 'uploaded'
+                ORDER BY tenant_id, created_at, relative_path
+                """
+            )
+        )
+        queued_rows = queued_result.mappings().all()
+        await session.commit()
+
+    by_tenant: dict[str, list[str]] = {}
+    for row in queued_rows:
+        tenant_id = str(row["tenant_id"])
+        document_id = str(row["id"])
+        tenant_queue = by_tenant.setdefault(tenant_id, [])
+        if document_id not in tenant_queue:
+            tenant_queue.append(document_id)
+
+    for tenant_id, document_ids in by_tenant.items():
+        _start_ingestion(document_ids, tenant_id)
+
+    queued_count = sum(len(ids) for ids in by_tenant.values())
+    logger.info(
+        "knowledge.ingestion_recovered",
+        stale_parsing=stale_count,
+        queued=queued_count,
+        tenants=len(by_tenant),
+    )
+    return {
+        "stale_parsing": stale_count,
+        "queued": queued_count,
+        "tenants": len(by_tenant),
+    }
 
 
 @router.post("/courses", response_model=CourseView, status_code=201)
@@ -383,6 +452,35 @@ async def list_courses(
         return [_row_to_course(row) for row in result.mappings().all()]
 
 
+@router.get("/available-courses", response_model=list[CourseView])
+async def list_available_courses(
+    current_user: dict = Depends(get_current_user),
+) -> list[CourseView]:
+    """普通登录用户可读取的课程列表，只返回已有完成文档的课程。"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT c.id, c.name, c.description, c.created_at, c.updated_at,
+                       COUNT(d.id)::int AS document_count,
+                       COUNT(d.id) FILTER (WHERE d.status = 'completed')::int AS completed_count,
+                       COALESCE(
+                           SUM(d.chunk_count) FILTER (WHERE d.status = 'completed'),
+                           0
+                       )::int AS chunk_count
+                FROM knowledge_courses c
+                JOIN knowledge_documents d ON d.course_id = c.id
+                WHERE c.tenant_id = :tenant_id
+                GROUP BY c.id
+                HAVING COUNT(d.id) FILTER (WHERE d.status = 'completed') > 0
+                ORDER BY c.name ASC
+                """
+            ),
+            {"tenant_id": current_user["tenant_id"]},
+        )
+        return [_row_to_course(row) for row in result.mappings().all()]
+
+
 @router.get("/courses/{course_id}", response_model=CourseView)
 async def get_course(
     course_id: str,
@@ -392,6 +490,93 @@ async def get_course(
     if not row:
         raise HTTPException(status_code=404, detail="课程不存在")
     return _row_to_course(row)
+
+
+@router.delete("/courses/{course_id}", status_code=204)
+async def delete_course(
+    course_id: str,
+    current_user: dict = Depends(require_admin),
+) -> None:
+    """
+    删除课程及其全部知识数据。
+
+    PostgreSQL 通过 ON DELETE CASCADE 删除 knowledge_documents；
+    Milvus 统一按 course_id 删除并仅重建一次剩余 BM25；
+    最后清理该课程完整上传目录（包含 HTML 资源文件）。
+    """
+    tenant_id = current_user["tenant_id"]
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT c.id,
+                       COUNT(d.id)::int AS document_count,
+                       COUNT(d.id) FILTER (
+                           WHERE d.status IN ('uploaded', 'parsing')
+                       )::int AS active_document_count
+                FROM knowledge_courses c
+                LEFT JOIN knowledge_documents d ON d.course_id = c.id
+                WHERE c.id = :course_id AND c.tenant_id = :tenant_id
+                GROUP BY c.id
+                """
+            ),
+            {"course_id": course_id, "tenant_id": tenant_id},
+        )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="课程不存在")
+        if int(row["active_document_count"] or 0) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="课程下有文档正在上传或解析，暂不能删除",
+            )
+        document_count = int(row["document_count"] or 0)
+
+    if document_count:
+        def _delete_vectors() -> None:
+            with _index_lock:
+                KnowledgeBaseClient().delete_course_and_rebuild(
+                    course_id,
+                    tenant_id,
+                )
+
+        await asyncio.to_thread(_delete_vectors)
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                DELETE FROM knowledge_courses
+                WHERE id = :course_id AND tenant_id = :tenant_id
+                RETURNING id
+                """
+            ),
+            {"course_id": course_id, "tenant_id": tenant_id},
+        )
+        if not result.first():
+            raise HTTPException(status_code=404, detail="课程不存在")
+        await session.commit()
+
+    course_root = get_course_upload_root(tenant_id, course_id)
+    try:
+        shutil.rmtree(course_root)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        # 课程与向量已经完成逻辑删除；残留磁盘文件不应让客户端误以为课程删除失败。
+        logger.warning(
+            "knowledge.course_storage_cleanup_failed",
+            course_id=course_id,
+            path=str(course_root),
+            error=str(exc),
+        )
+
+    logger.info(
+        "knowledge.course_deleted",
+        course_id=course_id,
+        tenant_id=tenant_id,
+        document_count=document_count,
+    )
 
 
 @router.get("/courses/{course_id}/documents", response_model=list[DocumentView])

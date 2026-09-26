@@ -8,9 +8,9 @@ MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将�
 
 | 模块 | 主要能力 | 关键实现 |
 | --- | --- | --- |
-| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、MCP Web Search、Memory |
+| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、Metadata Scoped Search、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、MCP Web Search、Memory |
 | **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、代码感知分块 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、HTML Image Enrichment、Code-aware Chunking、BGE-M3 + BM25 |
-| **Knowledge Management · 知识库管理** | 管理员创建课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、重新解析/删除 |
+| **Knowledge Management · 知识库管理** | 管理员创建/删除课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、启动恢复、重新解析/删除、课程级级联清理 |
 | **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
 | **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
 | **Interview · 模拟面试** | 多阶段技术面试、回答评价、追问与最终报告 | LangGraph 状态流转、分阶段对话、回答评估、会话记忆 |
@@ -29,7 +29,7 @@ QA Agent 首先将问题区分为：
 - **General**：通用问题，直接由 LLM 回答；需要实时信息时可调用 Web Search。
 - **Specialized**：课程或专业知识问题，进入 RAG 检索链路。
 
-对于 Specialized Query，先执行 **Query Rewrite** 补全多轮对话中的指代与省略，再由 Structural Router 判断检索结构：
+对于 Specialized Query，先执行 **Query Rewrite** 补全多轮对话中的指代与省略，再经过 **Resolve Scope** 确定知识检索范围，最后由 Structural Router 判断检索结构：
 
 - **SINGLE**：单一信息需求，直接使用 Rewrite Query 检索。
 - **BROAD / Multi Query**：多个可在检索前独立拆分的角度，最多生成 3 个子 Query 并行检索，再合并去重。
@@ -39,12 +39,22 @@ QA Agent 首先将问题区分为：
 
 其中 **BROAD / Multi Query** 解决“问题结构需要并行拆分”，**ITERATIVE** 解决“后续问题依赖上一轮证据”，而 **HyDE** 解决“Query 与知识库文档表达不匹配导致的低质量检索”，三者职责分离。
 
+### Metadata Scoped Search
+
+- `tenant_id` 始终作为不可放宽的隔离边界；
+- QA 前端可选择一个课程，将 `course_id` 作为 Hard Scope 贯穿 SINGLE / BROAD / ITERATIVE / HyDE / Gap Retrieval；
+- 显式 `document_id` 会校验租户与课程归属，并作为不可放宽范围；
+- 当 Query 唯一、明确命中文档文件名/相对路径时，可增加 Soft Document Scope；若该范围 0 召回，只移除这一层文档限制后在同一课程内重试；
+- 新入库 Chunk 同时保存 `document_type / relative_path / chapter / section`，为后续更细粒度过滤与 Citation 做准备。
+
 ### Hybrid Retrieval
 
 当前代码中的混合检索方案为：
 
 ```text
 Query
+        │
+        └── Metadata Scope（tenant / course / document）
         │
         ├── BGE-M3 Dense Vector ──┐
         │                         ├── Milvus Hybrid Search

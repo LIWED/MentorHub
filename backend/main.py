@@ -63,7 +63,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("app.local_models_warmup_failed | error=%s", e)  # 预热失败也不拦启动
 
-    # ③ 驱动 MCP Server 的 lifespan（mount 不会自动调用子应用的 lifespan，需手动嵌套进入）
+    # ③ 恢复被 reload / 崩溃中断的知识入库任务。
+    # ingestion 当前是进程内 asyncio task，重启后需从 PostgreSQL 状态恢复队列。
+    try:
+        from backend.api.v1.knowledge import recover_interrupted_ingestion
+        recovery = await recover_interrupted_ingestion()
+        logger.info(
+            "app.knowledge_ingestion_recovery | stale=%s queued=%s tenants=%s",
+            recovery["stale_parsing"],
+            recovery["queued"],
+            recovery["tenants"],
+        )
+    except Exception as e:
+        logger.warning("app.knowledge_ingestion_recovery_failed | error=%s", e)
+
+    # ④ 驱动 MCP Server 的 lifespan（mount 不会自动调用子应用的 lifespan，需手动嵌套进入）
     async with _kb_app.router.lifespan_context(_kb_app):
         async with _ws_app.router.lifespan_context(_ws_app):
             logger.info("app.started")

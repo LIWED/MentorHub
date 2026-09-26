@@ -108,6 +108,28 @@
           />
           <div class="input-actions-bar">
             <div class="actions-left">
+              <el-tooltip
+                content="限定本次问答只检索所选课程；留空则检索全部可用课程"
+                placement="top"
+              >
+                <el-select
+                  v-model="selectedCourseId"
+                  class="course-scope-select"
+                  clearable
+                  filterable
+                  size="small"
+                  placeholder="全部课程"
+                  :disabled="isStreaming"
+                >
+                  <el-option
+                    v-for="course in availableCourses"
+                    :key="course.id"
+                    :label="course.name"
+                    :value="course.id"
+                  />
+                </el-select>
+              </el-tooltip>
+
               <!-- Web Search 开关 -->
               <el-tooltip
                 :content="webSearchEnabled ? 'Web 搜索已开启：知识库未命中时将自动检索互联网' : 'Web 搜索已关闭：仅使用本地知识库与模型自有知识'"
@@ -160,6 +182,7 @@ import QATimingDetails from '@/components/qa/QATimingDetails.vue'
 import { useAuthStore } from '@/stores/auth'
 import { qaApi } from '@/api/qa'
 import type { QATiming } from '@/api/qa'
+import { knowledgeApi, type KnowledgeCourse } from '@/api/knowledge'
 import { useResizableInput } from '@/composables/useResizableInput'
 import iconQa from '@/assets/images/icon_qa.jpg'
 
@@ -193,6 +216,8 @@ const currentSessionId = ref('')
 const messages = ref<Message[]>([])
 const inputText = ref('')
 const messagesEl = ref<HTMLElement>()
+const availableCourses = ref<KnowledgeCourse[]>([])
+const selectedCourseId = ref('')
 
 // 流式状态
 const isStreaming = ref(false)
@@ -325,6 +350,7 @@ async function sendMessage() {
       },
       body: JSON.stringify({
         session_id:        currentSessionId.value,
+        course_id:         selectedCourseId.value || null,
         message:           text,
         enable_web_search: webSearchEnabled.value,
       }),
@@ -426,7 +452,20 @@ async function loadSessions() {
   }
 }
 
+async function loadAvailableCourses() {
+  try {
+    const { data } = await knowledgeApi.listAvailableCourses()
+    availableCourses.value = data
+    if (data.length === 1) {
+      selectedCourseId.value = data[0].id
+    }
+  } catch (err) {
+    console.error('[QA courses]', err)
+  }
+}
+
 onMounted(async () => {
+  await loadAvailableCourses()
   await loadSessions()
 })
 </script>
@@ -710,6 +749,10 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.course-scope-select {
+  width: 190px;
 }
 
 .search-toggle-pill {

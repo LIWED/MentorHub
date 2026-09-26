@@ -64,13 +64,22 @@ def _state(**overrides) -> dict:
 async def test_single_retrieval_uses_wider_candidate_pool_and_evidence_window(monkeypatch):
     captured = {}
 
-    def fake_retrieve(query, tenant_id, course_id, *, recall_top_k, rerank_top_k):
+    def fake_retrieve(
+        query,
+        tenant_id,
+        course_id,
+        *,
+        recall_top_k,
+        rerank_top_k,
+        metadata_scope=None,
+    ):
         captured.update(
             query=query,
             tenant_id=tenant_id,
             course_id=course_id,
             recall_top_k=recall_top_k,
             rerank_top_k=rerank_top_k,
+            metadata_scope=metadata_scope,
         )
         docs = [_doc(f"d{i}", score=0.95 - i * 0.01) for i in range(rerank_top_k)]
         return docs, docs[0].score
@@ -101,9 +110,18 @@ async def test_single_retrieval_reads_runtime_settings(monkeypatch):
         ),
     )
 
-    def fake_retrieve(query, tenant_id, course_id, *, recall_top_k, rerank_top_k):
+    def fake_retrieve(
+        query,
+        tenant_id,
+        course_id,
+        *,
+        recall_top_k,
+        rerank_top_k,
+        metadata_scope=None,
+    ):
         captured["recall_top_k"] = recall_top_k
         captured["rerank_top_k"] = rerank_top_k
+        captured["metadata_scope"] = metadata_scope
         docs = [_doc(f"d{i}", score=0.9 - i * 0.01) for i in range(rerank_top_k)]
         return docs, 0.9
 
@@ -112,7 +130,9 @@ async def test_single_retrieval_reads_runtime_settings(monkeypatch):
 
     result = await nodes.retrieve_node(_state())
 
-    assert captured == {"recall_top_k": 31, "rerank_top_k": 7}
+    assert captured["recall_top_k"] == 31
+    assert captured["rerank_top_k"] == 7
+    assert captured["metadata_scope"] == {"tenant_id": "tenant_default"}
     assert len(result["ranked_chunks"]) == 7
     assert result["is_high_confidence"] is True
 

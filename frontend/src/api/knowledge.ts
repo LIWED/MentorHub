@@ -41,12 +41,17 @@ export interface KnowledgeUploadResult {
 
 export const knowledgeApi = {
   listCourses: () => client.get<KnowledgeCourse[]>('/knowledge/courses'),
+  listAvailableCourses: () =>
+    client.get<KnowledgeCourse[]>('/knowledge/available-courses'),
 
   createCourse: (data: { name: string; description?: string }) =>
     client.post<KnowledgeCourse>('/knowledge/courses', data),
 
   getCourse: (courseId: string) =>
     client.get<KnowledgeCourse>(`/knowledge/courses/${courseId}`),
+
+  deleteCourse: (courseId: string) =>
+    client.delete(`/knowledge/courses/${courseId}`),
 
   listDocuments: (courseId: string) =>
     client.get<KnowledgeDocument[]>(`/knowledge/courses/${courseId}/documents`),
