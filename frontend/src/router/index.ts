@@ -88,6 +88,12 @@ const router = createRouter({
           component: () => import('@/views/SettingsView.vue'),
           meta: { requiresAdmin: true },
         },
+        {
+          path: 'knowledge',
+          name: 'knowledge-management',
+          component: () => import('@/views/KnowledgeManageView.vue'),
+          meta: { requiresAdmin: true },
+        },
       ],
     },
     {

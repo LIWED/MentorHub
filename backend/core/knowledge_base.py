@@ -277,6 +277,9 @@ class KnowledgeBaseClient:
         for chunk, sparse in zip(corpus, sparse_vectors):
             chunk.sparse_embedding = sparse
 
+        # 更新同一 document_id 时，新旧 chunk 数量和内容都可能变化。
+        # 先删旧文档，避免旧 chunk id 未被新 upsert 覆盖而残留在集合中。
+        self.delete_document_chunks(document_id)
         self.upsert_chunks(corpus)
         logger.info(
             "knowledge_base.bm25_rebuilt",
@@ -292,6 +295,24 @@ class KnowledgeBaseClient:
             filter=f'document_id == "{safe_id}"',
         )
         logger.info("knowledge_base.document_deleted", document_id=document_id)
+
+    def delete_document_and_rebuild(self, document_id: str) -> None:
+        """删除一个文档，并为剩余语料重新计算 BM25 IDF。"""
+        remaining = self.list_chunks(exclude_document_id=document_id)
+        self.delete_document_chunks(document_id)
+        if not remaining:
+            return
+
+        sparse_vectors = BM25SparseEncoder.encode_documents(
+            [chunk.content for chunk in remaining]
+        )
+        for chunk, sparse in zip(remaining, sparse_vectors):
+            chunk.sparse_embedding = sparse
+        self.upsert_chunks(remaining)
+        logger.info(
+            "knowledge_base.bm25_rebuilt_after_delete",
+            remaining_chunks=len(remaining),
+        )
 
     @staticmethod
     def generate_chunk_id(content: str, document_id: str, chunk_index: int) -> str:

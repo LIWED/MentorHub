@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     mineru_timeout_seconds: int = 900
     mineru_model_source: str = ""  # 可选：modelscope / huggingface
 
+    # ── 知识库上传（仅离线 ingestion 阶段）──
+    # 前端上传的课程资料会按 tenant/course/relative_path 原样保存，
+    # HTML / Markdown 才能继续解析相邻的 img/assets 等相对路径资源。
+    knowledge_upload_root: str = "./data/knowledge_uploads"
+    knowledge_upload_max_file_mb: int = 100
+
     # ── JWT 认证 ──
     jwt_secret_key: str  # 必填：签发登录令牌用的密钥
     jwt_algorithm: str = "HS256"  # 签名算法

@@ -2,7 +2,16 @@
 # API 路由总入口
 
 from fastapi import APIRouter
-from backend.api.v1 import auth, qa, exam, resume, interview, unified_chat, settings
+from backend.api.v1 import (
+    auth,
+    qa,
+    exam,
+    resume,
+    interview,
+    unified_chat,
+    settings,
+    knowledge,
+)
 
 api_router = APIRouter()                              # 总路由
 
@@ -14,3 +23,4 @@ api_router.include_router(exam.router,          prefix="/exam",      tags=["试�
 api_router.include_router(resume.router,        prefix="/resume",    tags=["简历审查"])  # 第 4 章
 api_router.include_router(interview.router,     prefix="/interview", tags=["模拟面试"])  # 第 7 章
 api_router.include_router(settings.router,      prefix="/settings",  tags=["系统设置"])
+api_router.include_router(knowledge.router,     prefix="/knowledge", tags=["知识库管理"])

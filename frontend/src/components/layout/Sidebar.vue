@@ -119,6 +119,7 @@ const teacherNavItems = [
 ]
 
 const adminNavItems = [
+  { path: '/knowledge', title: '知识库管理', icon: Collection },
   { path: '/settings', title: '系统设置', icon: Setting },
 ]
 
