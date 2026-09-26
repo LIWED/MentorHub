@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 class ChatRequest(BaseModel):
     session_id:        str        = Field(..., description="会话 ID")
     course_id:         str | None = Field(None, description="课程 ID（可选，限定检索范围）")
+    document_id:       str | None = Field(None, description="文档 ID（可选，进一步限定检索范围）")
     message:           str        = Field(..., min_length=1, max_length=2000)
     enable_web_search: bool       = Field(False, description="低置信度时是否先走 Web Search 再给 LLM")
 
@@ -242,6 +243,7 @@ async def chat(
         "tenant_id": current_user["tenant_id"],
         "session_id": req.session_id,
         "course_id": req.course_id,
+        "requested_document_id": req.document_id,
         "query_type": "SINGLE",
         "enable_web_search": req.enable_web_search,
         "web_search_results": [],
@@ -346,6 +348,7 @@ async def chat_stream(
         "tenant_id": current_user["tenant_id"],
         "session_id": req.session_id,
         "course_id": req.course_id,
+        "requested_document_id": req.document_id,
         "query_type": "SINGLE",
         "enable_web_search": req.enable_web_search,
         "web_search_results": [],
@@ -354,6 +357,7 @@ async def chat_stream(
     _GENERATE_NODES = {"generate_rag", "generate_direct", "generate_general"}
     _PROGRESS_LABELS = {
         "classify_query": "理解问题中...",
+        "resolve_scope": "确定知识范围...",
         "structural_router": "选择检索策略...",
         "multi_query_rewrite": "改写查询中...",
         "iterative_plan": "规划检索步骤...",

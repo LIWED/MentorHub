@@ -21,6 +21,7 @@ class QAState(TypedDict):
     tenant_id:   str            # 租户 ID（Milvus / DB 多租户隔离）
     session_id:  str            # 会话 ID（用于构造 thread_id）
     course_id:   Optional[str]  # 课程 ID，限制检索范围；None = 全库检索
+    requested_document_id: Optional[str]  # 用户/前端显式指定的文档范围
 
     # ── ③ Query 处理中间结果──────────────────────────────────────
     original_query:    str         # 用户原始输入，全程不变
@@ -28,6 +29,8 @@ class QAState(TypedDict):
     query_type:        str         # GENERAL / SINGLE / BROAD / ITERATIVE
     rewritten_queries: list[str]   # BROAD 分支：Multi-Query 改写后的子 Query 列表
     hyde_document:     Optional[str]  # Direct Retrieval 低质量时生成的 HyDE 假想文档
+    metadata_scope:    dict           # tenant/course/document 等统一检索范围
+    scope_source:      str            # request / query_document / soft_document_relaxed
 
     # ITERATIVE 分支：最多 3 个逻辑问题、最多 3 轮依赖检索
     iterative_seed_query: Optional[str]

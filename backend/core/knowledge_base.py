@@ -173,6 +173,10 @@ class DocumentChunk:
     chunk_index: int
     version: str
     tenant_id: str = "tenant_default"
+    document_type: str = ""
+    relative_path: str = ""
+    chapter: str = ""
+    section: str = ""
     updated_at: int = field(default_factory=lambda: int(time.time()))
 
 
@@ -219,6 +223,10 @@ class KnowledgeBaseClient:
                 "source_name": c.source_name,
                 "chunk_type": c.chunk_type,
                 "version": c.version,
+                "document_type": c.document_type,
+                "relative_path": c.relative_path,
+                "chapter": c.chapter,
+                "section": c.section,
                 "updated_at": c.updated_at,
             }
             for c in chunks
@@ -227,12 +235,20 @@ class KnowledgeBaseClient:
         logger.info("knowledge_base.chunks_upserted", count=len(chunks))
         return len(chunks)
 
-    def list_chunks(self, exclude_document_id: Optional[str] = None) -> list[DocumentChunk]:
+    def list_chunks(
+        self,
+        exclude_document_id: Optional[str] = None,
+        exclude_course_id: Optional[str] = None,
+    ) -> list[DocumentChunk]:
         """读取当前语料，用于新增文档时重新计算全库 BM25 IDF。"""
-        filter_expr = ""
+        filter_parts: list[str] = []
         if exclude_document_id:
             safe_id = exclude_document_id.replace('"', '\\"')
-            filter_expr = f'document_id != "{safe_id}"'
+            filter_parts.append(f'document_id != "{safe_id}"')
+        if exclude_course_id:
+            safe_course = exclude_course_id.replace('"', '\\"')
+            filter_parts.append(f'course_id != "{safe_course}"')
+        filter_expr = " and ".join(filter_parts)
 
         rows = self._client.query(
             collection_name=COLLECTION_NAME,
@@ -240,7 +256,8 @@ class KnowledgeBaseClient:
             output_fields=[
                 "id", "embedding", "sparse_embedding", "content", "chunk_index",
                 "document_id", "course_id", "tenant_id", "source_name",
-                "chunk_type", "version", "updated_at",
+                "chunk_type", "version", "document_type", "relative_path",
+                "chapter", "section", "updated_at",
             ],
             limit=16384,
         )
@@ -257,6 +274,10 @@ class KnowledgeBaseClient:
                 chunk_index=row.get("chunk_index", 0),
                 version=row.get("version", "1.0"),
                 tenant_id=row.get("tenant_id", "tenant_default"),
+                document_type=row.get("document_type", "") or "",
+                relative_path=row.get("relative_path", "") or "",
+                chapter=row.get("chapter", "") or "",
+                section=row.get("section", "") or "",
                 updated_at=row.get("updated_at", int(time.time())),
             )
             for row in rows
@@ -314,6 +335,47 @@ class KnowledgeBaseClient:
             remaining_chunks=len(remaining),
         )
 
+    def delete_course_chunks(self, course_id: str, tenant_id: str) -> None:
+        """删除指定租户课程的全部 Chunk。"""
+        safe_course = course_id.replace('"', '\\"')
+        safe_tenant = tenant_id.replace('"', '\\"')
+        self._client.delete(
+            collection_name=COLLECTION_NAME,
+            filter=(
+                f'course_id == "{safe_course}" '
+                f'and tenant_id == "{safe_tenant}"'
+            ),
+        )
+        logger.info(
+            "knowledge_base.course_deleted",
+            course_id=course_id,
+            tenant_id=tenant_id,
+        )
+
+    def delete_course_and_rebuild(self, course_id: str, tenant_id: str) -> None:
+        """
+        删除一个课程的全部 Chunk，并只对剩余语料重建一次 BM25。
+
+        相比逐文档调用 delete_document_and_rebuild，可避免一个课程 N 个文档
+        触发 N 次全库重建。
+        """
+        remaining = self.list_chunks(exclude_course_id=course_id)
+        self.delete_course_chunks(course_id, tenant_id)
+        if not remaining:
+            return
+
+        sparse_vectors = BM25SparseEncoder.encode_documents(
+            [chunk.content for chunk in remaining]
+        )
+        for chunk, sparse in zip(remaining, sparse_vectors):
+            chunk.sparse_embedding = sparse
+        self.upsert_chunks(remaining)
+        logger.info(
+            "knowledge_base.bm25_rebuilt_after_course_delete",
+            course_id=course_id,
+            remaining_chunks=len(remaining),
+        )
+
     @staticmethod
     def generate_chunk_id(content: str, document_id: str, chunk_index: int) -> str:
         return generate_chunk_id(content, document_id, chunk_index)
@@ -351,6 +413,7 @@ class KnowledgeBaseClient:
                 output_fields=[
                     "content", "source_name", "chunk_type",
                     "course_id", "document_id", "chunk_index",
+                    "document_type", "relative_path", "chapter", "section",
                 ],
             )
 
@@ -367,6 +430,10 @@ class KnowledgeBaseClient:
                             "course_id": entity.get("course_id") or "",
                             "document_id": entity.get("document_id") or "",
                             "chunk_index": entity.get("chunk_index") or 0,
+                            "document_type": entity.get("document_type") or "",
+                            "relative_path": entity.get("relative_path") or "",
+                            "chapter": entity.get("chapter") or "",
+                            "section": entity.get("section") or "",
                         },
                     }
                 )
@@ -383,12 +450,39 @@ class KnowledgeBaseClient:
             return []
 
     @staticmethod
-    def _build_filter(tenant_id: str, course_id: Optional[str] = None) -> str:
+    def _build_filter(
+        tenant_id: str,
+        course_id: Optional[str] = None,
+        *,
+        metadata_scope: Optional[dict] = None,
+    ) -> str:
+        """
+        构造 Milvus metadata filter。
+
+        tenant_id 永远是硬边界；metadata_scope 可继续收窄 course/document/chapter
+        等范围。调用方传入的 course_id 保留兼容，scope 中同名字段优先。
+        """
+        scope = dict(metadata_scope or {})
         safe_tenant = tenant_id.replace('"', '\\"')
         expr = f'tenant_id == "{safe_tenant}"'
-        if course_id:
-            safe_course = course_id.replace('"', '\\"')
+
+        resolved_course = scope.get("course_id") or course_id
+        if resolved_course:
+            safe_course = str(resolved_course).replace('"', '\\"')
             expr += f' and course_id == "{safe_course}"'
+
+        for field_name in (
+            "document_id",
+            "document_type",
+            "chapter",
+            "section",
+            "chunk_type",
+        ):
+            value = scope.get(field_name)
+            if value in (None, ""):
+                continue
+            safe_value = str(value).replace('"', '\\"')
+            expr += f' and {field_name} == "{safe_value}"'
         return expr
 
 

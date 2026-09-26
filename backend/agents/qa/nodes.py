@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import uuid
 
 from sqlalchemy import text
@@ -292,6 +293,11 @@ async def classify_query_node(state: QAState) -> dict:
         "existing_summary":  existing_summary,
         "rewritten_queries": [],
         "hyde_document":     None,
+        "metadata_scope": {
+            "tenant_id": state["tenant_id"],
+            **({"course_id": state["course_id"]} if state.get("course_id") else {}),
+        },
+        "scope_source": "course" if state.get("course_id") else "tenant",
         "iterative_seed_query": None,
         "iterative_intent": None,
         "iterative_plan": [],
@@ -409,6 +415,226 @@ async def rewrite_query_node(state: QAState) -> dict:
         history_messages=len(history),
     )
     return {"rewritten_query": rewritten}
+
+
+# ──────────────────────────────────────────────────────────────
+# 节点：resolve_scope — 确定 metadata 检索范围
+# ──────────────────────────────────────────────────────────────
+
+_SCOPE_ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{2,}")
+_SCOPE_CN_TOKEN_RE = re.compile(r"[一-鿿]{4,}")
+
+
+def _document_match_score(query: str, filename: str, relative_path: str) -> int:
+    """
+    对“用户是否明确点名某个文档”做保守匹配。
+
+    只使用文件名/相对路径中的较长中英文 token；如果多个文档并列最高分，
+    调用方会放弃 soft scope，避免误过滤掉正确答案。
+    """
+    query_lower = (query or "").casefold()
+    source = f"{filename} {relative_path}"
+    tokens = {
+        token.casefold()
+        for token in [
+            *_SCOPE_ASCII_TOKEN_RE.findall(source),
+            *_SCOPE_CN_TOKEN_RE.findall(source),
+        ]
+    }
+    score = 0
+    for token in tokens:
+        if token in query_lower:
+            score += min(len(token), 12)
+    return score
+
+
+async def resolve_scope_node(state: QAState) -> dict:
+    """
+    生成本轮统一 metadata_scope。
+
+    Hard scope:
+      - tenant_id 永远保留；
+      - 前端传入的 course_id 永远保留；
+      - 显式 document_id 校验归属后保留。
+
+    Soft scope:
+      - 仅在已选择 course_id 时，根据 rewritten_query 对课程文档名做唯一命中。
+      - 不确定或目录查询失败就不加 document filter。
+    """
+    from backend.dependencies import AsyncSessionLocal
+
+    tenant_id = state["tenant_id"]
+    course_id = state.get("course_id")
+    requested_document_id = state.get("requested_document_id")
+    query = state.get("rewritten_query") or state["original_query"]
+
+    scope: dict = {"tenant_id": tenant_id}
+    if course_id:
+        scope["course_id"] = course_id
+    source = "course" if course_id else "tenant"
+
+    try:
+        async with AsyncSessionLocal() as db:
+            if requested_document_id:
+                sql = """
+                    SELECT id
+                    FROM knowledge_documents
+                    WHERE id = :document_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'completed'
+                """
+                params = {
+                    "document_id": requested_document_id,
+                    "tenant_id": tenant_id,
+                }
+                if course_id:
+                    sql += " AND course_id = :course_id"
+                    params["course_id"] = course_id
+                row = (await db.execute(text(sql), params)).first()
+                if row:
+                    scope["document_id"] = str(row[0])
+                    source = "request_document"
+                else:
+                    logger.warning(
+                        "resolve_scope.requested_document_invalid",
+                        document_id=requested_document_id,
+                        course_id=course_id,
+                    )
+
+            elif course_id:
+                result = await db.execute(
+                    text(
+                        """
+                        SELECT id, filename, relative_path
+                        FROM knowledge_documents
+                        WHERE tenant_id = :tenant_id
+                          AND course_id = :course_id
+                          AND status = 'completed'
+                        ORDER BY relative_path ASC
+                        """
+                    ),
+                    {"tenant_id": tenant_id, "course_id": course_id},
+                )
+                candidates = []
+                for row in result.mappings().all():
+                    score = _document_match_score(
+                        query,
+                        row["filename"],
+                        row["relative_path"],
+                    )
+                    if score > 0:
+                        candidates.append(
+                            (score, str(row["id"]), row["relative_path"])
+                        )
+
+                candidates.sort(key=lambda item: item[0], reverse=True)
+                if candidates and (
+                    len(candidates) == 1 or candidates[0][0] > candidates[1][0]
+                ):
+                    scope["document_id"] = candidates[0][1]
+                    source = "query_document"
+                    logger.info(
+                        "resolve_scope.soft_document_match",
+                        document_id=candidates[0][1],
+                        relative_path=candidates[0][2],
+                        score=candidates[0][0],
+                    )
+    except Exception as exc:
+        # Scope Resolver 是检索优化节点，不应因目录 DB 短暂异常打断整条 QA。
+        # tenant/course hard scope 仍然保留，document soft scope 直接跳过。
+        logger.warning(
+            "resolve_scope.catalog_failed",
+            course_id=course_id,
+            error=str(exc),
+        )
+
+    logger.info(
+        "resolve_scope.done",
+        source=source,
+        course_id=scope.get("course_id"),
+        document_id=scope.get("document_id"),
+    )
+    return {
+        "metadata_scope": scope,
+        "scope_source": source,
+    }
+
+def _relax_soft_document_scope(
+    scope: dict,
+    scope_source: str,
+) -> tuple[dict, str, bool]:
+    """只有 Query 自动推断的 document scope 才允许在 0 召回时放宽。"""
+    if scope_source != "query_document" or not scope.get("document_id"):
+        return scope, scope_source, False
+    relaxed = dict(scope)
+    relaxed.pop("document_id", None)
+    return relaxed, "soft_document_relaxed", True
+
+
+async def _retrieve_queries_with_scope(
+    state: QAState,
+    queries: list[str],
+    *,
+    recall_top_k: int,
+    rerank_top_k: int,
+) -> tuple[list[tuple[str, list, float]], dict, str]:
+    """
+    对一组 Query 使用同一个 scope 检索。
+
+    若 soft document scope 下所有 Query 都 0 召回，则整组统一放宽到
+    tenant/course hard scope 后重试，避免 BROAD/ITERATIVE 混用不同范围。
+    """
+    from backend.core.reranker import retrieve
+
+    tenant_id = state["tenant_id"]
+    course_id = state.get("course_id")
+    scope = dict(state.get("metadata_scope") or {})
+    if not scope:
+        scope = {"tenant_id": tenant_id}
+        if course_id:
+            scope["course_id"] = course_id
+    scope_source = state.get("scope_source") or (
+        "course" if course_id else "tenant"
+    )
+    loop = asyncio.get_running_loop()
+
+    async def run(current_scope: dict):
+        async def retrieve_one(search_query: str):
+            docs, confidence = await loop.run_in_executor(
+                None,
+                lambda: retrieve(
+                    search_query,
+                    tenant_id,
+                    course_id,
+                    metadata_scope=current_scope,
+                    recall_top_k=recall_top_k,
+                    rerank_top_k=rerank_top_k,
+                ),
+            )
+            return search_query, docs, confidence
+
+        return await asyncio.gather(*[
+            retrieve_one(search_query)
+            for search_query in queries
+        ]) if queries else []
+
+    results = await run(scope)
+    if results and all(not docs for _, docs, _ in results):
+        relaxed_scope, relaxed_source, relaxed = _relax_soft_document_scope(
+            scope,
+            scope_source,
+        )
+        if relaxed:
+            logger.info(
+                "metadata_scope.soft_document_relaxed",
+                document_id=scope.get("document_id"),
+                course_id=scope.get("course_id"),
+            )
+            scope = relaxed_scope
+            scope_source = relaxed_source
+            results = await run(scope)
+
+    return results, scope, scope_source
 
 
 # ──────────────────────────────────────────────────────────────
@@ -677,8 +903,6 @@ async def iterative_retrieve_node(state: QAState) -> dict:
     - 同一依赖层并行检索；
     - 后续 Query 只基于前轮证据展开。
     """
-    from backend.core.reranker import retrieve
-
     plan = (state.get("iterative_plan") or [])[:MAX_ITERATIVE_QUESTIONS]
     if not plan:
         plan = _normalize_iterative_plan(
@@ -686,9 +910,7 @@ async def iterative_retrieve_node(state: QAState) -> dict:
             state.get("rewritten_query") or state["original_query"],
         )
 
-    tenant_id = state["tenant_id"]
-    course_id = state.get("course_id")
-    loop = asyncio.get_running_loop()
+    retrieval_state = dict(state)
 
     completed: set[str] = set()
     evidence_by_id: dict[str, list] = {}
@@ -736,23 +958,20 @@ async def iterative_retrieve_node(state: QAState) -> dict:
                     all_queries.append(search_query)
                 retrieval_jobs.append((qid, search_query))
 
-        async def retrieve_one(qid: str, search_query: str):
-            docs, _ = await loop.run_in_executor(
-                None,
-                lambda: retrieve(
-                    search_query,
-                    tenant_id,
-                    course_id,
-                    recall_top_k=_qa_runtime().recall_top_k_iterative,
-                    rerank_top_k=_qa_runtime().rerank_evidence_top_k,
-                ),
+        scoped_results, resolved_scope, resolved_source = (
+            await _retrieve_queries_with_scope(
+                retrieval_state,
+                [search_query for _, search_query in retrieval_jobs],
+                recall_top_k=_qa_runtime().recall_top_k_iterative,
+                rerank_top_k=_qa_runtime().rerank_evidence_top_k,
             )
-            return qid, docs
-
-        retrieved = await asyncio.gather(*[
-            retrieve_one(qid, search_query)
-            for qid, search_query in retrieval_jobs
-        ])
+        )
+        retrieval_state["metadata_scope"] = resolved_scope
+        retrieval_state["scope_source"] = resolved_source
+        retrieved = [
+            (qid, docs)
+            for (qid, _), (_, docs, _) in zip(retrieval_jobs, scoped_results)
+        ]
 
         for qid, docs in retrieved:
             current = evidence_by_id.setdefault(qid, [])
@@ -841,6 +1060,11 @@ async def iterative_retrieve_node(state: QAState) -> dict:
         "iterative_queries": all_queries,
         "iterative_results": iterative_results,
         "iteration_count": iteration_count,
+        "metadata_scope": retrieval_state.get("metadata_scope", {}),
+        "scope_source": retrieval_state.get(
+            "scope_source",
+            state.get("scope_source", ""),
+        ),
     }
 
 
@@ -858,33 +1082,32 @@ async def retrieve_node(state: QAState) -> dict:
     HyDE 不在这里作为一级分支；只有本次检索质量不足时才由图路由到
     hyde_generate → hyde_retrieve 做第二次增强检索。
     """
-    from backend.core.reranker import BGEReranker, retrieve, RankedDocument
+    from backend.core.reranker import BGEReranker, RankedDocument
 
     query_type      = state.get("query_type", "SINGLE").upper()
-    tenant_id       = state["tenant_id"]
-    course_id       = state.get("course_id")
     original_query  = state["original_query"]
     rewritten_query = state.get("rewritten_query") or original_query
 
     loop = asyncio.get_running_loop()
+    resolved_scope = dict(state.get("metadata_scope") or {})
+    resolved_source = state.get("scope_source") or ""
 
     # ── BROAD：并行多 Query 检索，合并去重 ───────────────────────
     if query_type == "BROAD" and state.get("rewritten_queries"):
         broad_queries = state["rewritten_queries"][:MAX_BROAD_QUERIES]
 
-        async def retrieve_one(sub_query: str) -> tuple[list, float]:
-            return await loop.run_in_executor(
-                None,
-                lambda: retrieve(
-                    sub_query,
-                    tenant_id,
-                    course_id,
-                    recall_top_k=_qa_runtime().recall_top_k_broad_per,
-                    rerank_top_k=_qa_runtime().rerank_evidence_top_k,
-                ),
+        scoped_results, resolved_scope, resolved_source = (
+            await _retrieve_queries_with_scope(
+                state,
+                broad_queries,
+                recall_top_k=_qa_runtime().recall_top_k_broad_per,
+                rerank_top_k=_qa_runtime().rerank_evidence_top_k,
             )
-
-        results = await asyncio.gather(*[retrieve_one(q) for q in broad_queries])
+        )
+        results = [
+            (docs, confidence)
+            for _, docs, confidence in scoped_results
+        ]
 
         # 合并去重：content 前 100 字符为 key，同一内容保留最高分。
         seen: dict[str, RankedDocument] = {}
@@ -917,16 +1140,15 @@ async def retrieve_node(state: QAState) -> dict:
             merged = []
     else:
         # SINGLE 以及其他安全兜底情况都先走原 Query / Rewrite Query 的直接检索。
-        merged, _ = await loop.run_in_executor(
-            None,
-            lambda: retrieve(
-                rewritten_query,
-                tenant_id,
-                course_id,
+        scoped_results, resolved_scope, resolved_source = (
+            await _retrieve_queries_with_scope(
+                state,
+                [rewritten_query],
                 recall_top_k=_qa_runtime().recall_top_k_single,
                 rerank_top_k=_qa_runtime().rerank_evidence_top_k,
-            ),
+            )
         )
+        merged = scoped_results[0][1] if scoped_results else []
 
     ranked_chunks = [
         {
@@ -955,6 +1177,8 @@ async def retrieve_node(state: QAState) -> dict:
         "new_evidence": [],
         "confidence": confidence,
         "is_high_confidence": is_high_confidence,
+        "metadata_scope": resolved_scope,
+        "scope_source": resolved_source,
     }
 
 
@@ -968,7 +1192,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
     3. 再使用真实 rewritten_query 做一次最终 Rerank；
     4. 输出新的 Top-3 和置信度，供第二次 Quality Gate 判断。
     """
-    from backend.core.reranker import BGEReranker, retrieve
+    from backend.core.reranker import BGEReranker
 
     hyde_document = (state.get("hyde_document") or "").strip()
     if not hyde_document:
@@ -978,22 +1202,19 @@ async def hyde_retrieve_node(state: QAState) -> dict:
             "fallback_used": True,
         }
 
-    tenant_id       = state["tenant_id"]
-    course_id       = state.get("course_id")
     original_query  = state["original_query"]
     rewritten_query = state.get("rewritten_query") or original_query
     loop = asyncio.get_running_loop()
 
-    hyde_docs, _ = await loop.run_in_executor(
-        None,
-        lambda: retrieve(
-            hyde_document,
-            tenant_id,
-            course_id,
+    scoped_results, resolved_scope, resolved_source = (
+        await _retrieve_queries_with_scope(
+            state,
+            [hyde_document],
             recall_top_k=_qa_runtime().recall_top_k_hyde,
             rerank_top_k=_qa_runtime().rerank_evidence_top_k,
-        ),
+        )
     )
+    hyde_docs = scoped_results[0][1] if scoped_results else []
 
     # 第一次 Direct Retrieval + HyDE Retrieval 合并去重。
     evidence_pool: list[dict] = []
@@ -1028,6 +1249,8 @@ async def hyde_retrieve_node(state: QAState) -> dict:
             "confidence": 0.0,
             "is_high_confidence": False,
             "fallback_used": True,
+            "metadata_scope": resolved_scope,
+            "scope_source": resolved_source,
         }
 
     # HyDE 只负责扩大召回；最终排序重新回到真实 Query，降低假想答案偏移风险。
@@ -1069,6 +1292,8 @@ async def hyde_retrieve_node(state: QAState) -> dict:
         "confidence": confidence,
         "is_high_confidence": is_high_confidence,
         "fallback_used": True,
+        "metadata_scope": resolved_scope,
+        "scope_source": resolved_source,
     }
 
 
@@ -1231,31 +1456,21 @@ async def gap_rewrite_node(state: QAState) -> dict:
 
 async def gap_retrieve_node(state: QAState) -> dict:
     """复用现有 Hybrid Retrieval，对缺口 Query 做定向补充召回。"""
-    from backend.core.reranker import retrieve
-
     gap_queries = (state.get("gap_queries") or [])[:_qa_runtime().max_gap_queries]
-    tenant_id = state["tenant_id"]
-    course_id = state.get("course_id")
-    loop = asyncio.get_running_loop()
     next_round = int(state.get("gap_round", 0)) + 1
 
-    async def retrieve_one(search_query: str):
-        docs, _ = await loop.run_in_executor(
-            None,
-            lambda: retrieve(
-                search_query,
-                tenant_id,
-                course_id,
-                recall_top_k=_qa_runtime().recall_top_k_single,
-                rerank_top_k=_qa_runtime().rerank_evidence_top_k,
-            ),
+    scoped_results, resolved_scope, resolved_source = (
+        await _retrieve_queries_with_scope(
+            state,
+            gap_queries,
+            recall_top_k=_qa_runtime().recall_top_k_single,
+            rerank_top_k=_qa_runtime().rerank_evidence_top_k,
         )
-        return search_query, docs
-
-    results = await asyncio.gather(*[
-        retrieve_one(search_query)
-        for search_query in gap_queries
-    ]) if gap_queries else []
+    )
+    results = [
+        (search_query, docs)
+        for search_query, docs, _ in scoped_results
+    ]
 
     seen: set[str] = set()
     new_evidence: list[dict] = []
@@ -1282,6 +1497,8 @@ async def gap_retrieve_node(state: QAState) -> dict:
     return {
         "new_evidence": new_evidence,
         "gap_round": next_round,
+        "metadata_scope": resolved_scope,
+        "scope_source": resolved_source,
     }
 
 

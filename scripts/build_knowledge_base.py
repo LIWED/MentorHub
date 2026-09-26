@@ -386,6 +386,8 @@ def embed_chunks(
     document_id: str,
     tenant_id: str = "tenant_default",
     version: str = "1.0",
+    document_type: str = "",
+    relative_path: str = "",
 ) -> list[DocumentChunk]:
     """
     对 split_documents() 产出的 chunk 列表做 BGE-M3 嵌入，返回 DocumentChunk 列表。
@@ -400,6 +402,8 @@ def embed_chunks(
         document_id: 文档的 UUID（用于 Milvus 幂等更新，删旧插新）
         tenant_id:   租户 ID，用于 Milvus 多租户过滤
         version:     课程版本号
+        document_type: 文档类型（html/pdf/md/...）
+        relative_path: 课程上传目录中的相对路径
 
     Returns:
         list[DocumentChunk]，每项包含 BGE-M3 Dense 向量；BM25 稀疏权重在写入前按当前全库语料重新计算
@@ -414,6 +418,12 @@ def embed_chunks(
         dense_vecs = embedder.encode(texts, batch_size=BATCH_SIZE)
         for i, (chunk, dense) in enumerate(zip(batch, dense_vecs)):
             global_index = batch_start + i    # 在整个文档中的顺序编号
+            section_parts = [
+                chunk.metadata.get("H2", ""),
+                chunk.metadata.get("H3", ""),
+                chunk.metadata.get("H4", ""),
+            ]
+            section = " > ".join(part for part in section_parts if part)
 
             all_doc_chunks.append(DocumentChunk(
                 id=generate_chunk_id(chunk.page_content, document_id, global_index),
@@ -427,6 +437,10 @@ def embed_chunks(
                 chunk_index=global_index,
                 version=version,
                 tenant_id=tenant_id,
+                document_type=document_type,
+                relative_path=relative_path,
+                chapter=chunk.metadata.get("H1", "") or "",
+                section=section,
             ))
 
         done = min(batch_start + BATCH_SIZE, total)
@@ -562,6 +576,8 @@ async def build_pipeline(
     tenant_id:   str = "tenant_default",
     version:     str = "1.0",
     use_context: bool = False,
+    document_type: str = "",
+    relative_path: str = "",
 ) -> dict:
     """
     知识库建库完整流水线（五步）：
@@ -604,6 +620,8 @@ async def build_pipeline(
         document_id=document_id,
         tenant_id=tenant_id,
         version=version,
+        document_type=document_type or Path(file_path).suffix.lower().lstrip("."),
+        relative_path=relative_path or Path(file_path).name,
     )
 
     # Step 4：写入
