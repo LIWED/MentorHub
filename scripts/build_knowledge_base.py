@@ -562,7 +562,7 @@ async def build_pipeline(
     tenant_id:   str = "tenant_default",
     version:     str = "1.0",
     use_context: bool = False,
-) -> None:
+) -> dict:
     """
     知识库建库完整流水线（五步）：
 
@@ -613,6 +613,22 @@ async def build_pipeline(
     print(f"\n🎉 完成！共处理 {len(doc_chunks)} 个 chunk")
     print(f"   document_id = {document_id}")
     print(f"   ⚠️  更新此文档时请保留此 document_id")
+
+    # 供前端知识库管理后台记录解析状态与统计。
+    # CLI 调用方可以继续忽略返回值，不影响原有使用方式。
+    metadata = dict(parsed.metadata or {})
+    if docs:
+        for key, value in docs[0].metadata.items():
+            metadata.setdefault(key, value)
+    return {
+        "parser": parsed.parser_name,
+        "content_format": parsed.content_format,
+        "extracted_chars": sum(len(doc.page_content) for doc in docs),
+        "chunk_count": len(doc_chunks),
+        "image_count": int(metadata.get("image_count", 0) or 0),
+        "image_enriched_count": int(metadata.get("image_enriched_count", 0) or 0),
+        "image_failed_count": int(metadata.get("image_failed_count", 0) or 0),
+    }
 
 
 if __name__ == '__main__':

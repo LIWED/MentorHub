@@ -8,11 +8,13 @@ MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将�
 
 | 模块 | 主要能力 | 关键实现 |
 | --- | --- | --- |
-| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query 分类、Query Rewrite、HyDE、Multi Query、Iterative Retrieval、Hybrid Retrieval、BGE Rerank、MCP Web Search、Memory |
-| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office 等文档解析、结构化入库、Markdown 图片抽取 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、Heading Chunking、BGE-M3 + BM25 |
+| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、MCP Web Search、Memory |
+| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、代码感知分块 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、HTML Image Enrichment、Code-aware Chunking、BGE-M3 + BM25 |
+| **Knowledge Management · 知识库管理** | 管理员创建课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、重新解析/删除 |
 | **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
 | **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
 | **Interview · 模拟面试** | 多阶段技术面试、回答评价、追问与最终报告 | LangGraph 状态流转、分阶段对话、回答评估、会话记忆 |
+| **System Settings · 管理员设置** | 在线调整 QA 检索参数、LLM 与 Web Search 配置 | Runtime Settings、Admin-only API、热更新、API Key 仅返回配置状态 |
 
 ---
 
@@ -33,7 +35,7 @@ QA Agent 首先将问题区分为：
 - **BROAD / Multi Query**：多个可在检索前独立拆分的角度，最多生成 3 个子 Query 并行检索，再合并去重。
 - **ITERATIVE**：存在前后依赖的信息需求，先规划最多 3 个逻辑问题，再根据上一阶段证据展开下一阶段 Query，最多进行 3 轮受控依赖检索。
 
-**HyDE 不再作为一级 Query Type。** SINGLE / BROAD / ITERATIVE 完成第一次检索后统一进入 Retrieval Quality Gate；如果检索质量不足，则生成 hypothetical document 做第二次检索，并将 Direct Retrieval 与 HyDE Retrieval 结果合并、去重后重新用真实 Query 做 Rerank。HyDE 后仍不足时，再根据联网开关进入 Web Search 或 LLM Direct。
+**HyDE 不再作为一级 Query Type。** SINGLE / BROAD / ITERATIVE 完成第一次检索后统一进入 Retrieval Quality Gate；如果相关性不足，则生成 hypothetical document 做第二次检索，并将 Direct Retrieval 与 HyDE Retrieval 结果合并、去重后重新用真实 Query 做 Rerank。HyDE 后若相关性仍不足，再根据联网开关进入 Web Search 或 LLM Direct；如果相关性通过，则进入独立的 **Evidence Sufficiency Gate**，证据不完整时只针对缺失信息执行 Gap Retrieval。
 
 其中 **BROAD / Multi Query** 解决“问题结构需要并行拆分”，**ITERATIVE** 解决“后续问题依赖上一轮证据”，而 **HyDE** 解决“Query 与知识库文档表达不匹配导致的低质量检索”，三者职责分离。
 
@@ -49,13 +51,13 @@ Query
         └── BM25 Sparse ──────────┘
                             WeightedRanker(0.7, 0.3)
                                     │
-                              Recall Top-K
+                              Candidate Pool
                                     │
-                         BGE-Reranker-v2-m3
+                            BGE Reranker
                                     │
-                              Rerank Top-K
+                           Evidence Top-K
                                     │
-                           LLM Generate Answer
+                    Relevance Gate → Sufficiency
 ```
 
 - Embedding：**BGE-M3**
@@ -64,10 +66,12 @@ Query
 - Vector DB：**Milvus**
 - Fusion：`WeightedRanker(0.7, 0.3)`，Dense / BM25 权重分别为 0.7 / 0.3。
 - Reranker：本地配置模型优先（默认路径 `models/reranker/bge-reranker-large`），本地权重不可用时回退到 **BAAI/bge-reranker-v2-m3**。
-- Hybrid Recall：按结构动态设置，SINGLE=8、BROAD=每个子 Query 4、ITERATIVE=每个展开 Query 6；HyDE fallback 二次检索召回 10。
-- Rerank：默认保留 Top 3。
+- Candidate Pool：运行时默认 **SINGLE=20、HyDE=20、BROAD=每个子 Query 10、ITERATIVE=每个展开 Query 12**。
+- Evidence Window：Reranker 默认保留 **Top 6**；真正送给生成模型的 Final Context 默认保留 **Top 3**。
 
-SINGLE / BROAD 的第一次检索使用 Reranker Top-1 分数进行置信度判断，当前经验阈值为 **0.75**；低于阈值先触发 HyDE 二次检索，而不是直接联网。ITERATIVE 分支仍结合各逻辑问题证据并通过 evidence sufficiency 判断；若整体证据不足，同样进入 HyDE fallback。HyDE 后仍不足时，再根据联网开关进入 Web Search 或 LLM Direct。
+当前把 **相关性（Relevance）** 与 **证据充分性（Sufficiency）** 分开处理：Reranker Top-1 分数负责判断“检索结果是否相关”，默认经验阈值为 **0.75**；相关性不足时先触发 HyDE，Direct Retrieval 与 HyDE Retrieval 合并后仍使用真实 Query 做全局 Rerank。相关性通过后，再由 Sufficiency Judge 判断“当前证据是否足够回答”；若不足，只针对缺失信息生成 Gap Query 并补搜。默认最多生成 **2 个 Gap Query**、执行 **2 轮 Gap Retrieval**，新旧证据合并去重后全局 Rerank，再次判断 Sufficiency。达到轮次上限仍不足时，再根据联网开关进入 Web Search 或有限证据生成路径。
+
+以上 Recall / Rerank / Final Top-K、置信度阈值和 Gap Retrieval 上限均可在管理员 `/settings` 页面运行时修改，无需重启后端。
 
 ### 多轮记忆
 
@@ -98,7 +102,7 @@ File
                          ↓
                    LangChain Document
                          ↓
-                 Heading / Text Chunking
+              Heading + Code-aware Chunking
                          ↓
                  BGE-M3 + BM25
                          ↓
@@ -118,9 +122,9 @@ MinerU 独立环境     → requirements-mineru.txt
 
 PDF 若 MinerU 不可用或解析失败，会降级到 `LegacyPdfParser / PyPDFLoader`；其它富文档则保留显式错误，避免静默丢失复杂内容。
 
-### Markdown 图片
+### Markdown / HTML 图片
 
-`MarkdownImageResolver` 会识别 Markdown 中的：
+`MarkdownImageResolver` 会识别 Markdown 图片与 HTML `<img>`；对于 `.html/.htm` 文件，MinerU Flash 先提取正文/标题/代码，再从原始 HTML 中解析图片引用并复用同一图片增强链路。
 
 ```markdown
 ![架构图](./images/rag.png)
@@ -132,8 +136,9 @@ PDF 若 MinerU 不可用或解析失败，会降级到 `LegacyPdfParser / PyPDFL
 - 本地相对路径和 Windows 绝对路径；
 - HTTP / HTTPS 图片下载；
 - 同一图片重复引用去重；
-- MinerU 图片解析失败不阻断整篇 Markdown；
-- 图片文本回填到原图片引用后，再进入正常 Markdown Chunking；
+- 图片优先使用 MinerU Advanced 解析，低价值结果可降级 OCR；
+- 图片解析失败不会阻断整篇文档；
+- Markdown 图片文本回填到原图片引用后；HTML 图片增强结果优先插回 MinerU 对应图片锚点附近；
 - 过滤只有图片路径的低价值结果；
 - 过滤明显由占位节点组成的错误 Mermaid。
 
@@ -146,6 +151,17 @@ PDF 若 MinerU 不可用或解析失败，会降级到 `LegacyPdfParser / PyPDFL
 ```
 
 > 当前 **普通截图、文本型图片、表格/公式图片** 已能进入知识库；复杂流程图和架构图的“节点连线关系”仍属于持续优化项。仓库中的 Ollama / Qwen3.5 图像理解脚本目前是实验工具，尚未作为正式默认 ingestion 能力接入。
+
+### Code-aware Chunking
+
+Markdown / HTML 解析后的 fenced code 不再和普通正文统一按 512 字符切分：
+
+- 普通文本默认 `chunk_size=512`、`chunk_overlap=100`；
+- 代码默认 `code_chunk_size=1200`、`code_chunk_overlap=120`；
+- 保留代码围栏、语言标识与原始缩进；
+- Python 优先按顶层 `def / async def / class` 边界切分；
+- 只有单个函数本身超过代码窗口时，才继续从函数内部二次切分；
+- Chunk 会携带 `chunk_type`、`code_language`、`code_part_index/total` 与 H1-H4 章节上下文。
 
 ### Contextual RAG
 
@@ -306,7 +322,7 @@ MentorHub/
 │  ├─ main.py                  # FastAPI 入口
 │  ├─ config.py                # 环境配置
 │  ├─ api/
-│  │  └─ v1/                   # auth / chat / qa / exam / resume / interview
+│  │  └─ v1/                   # auth / chat / qa / exam / resume / interview / settings
 │  ├─ agents/
 │  │  ├─ qa/                   # KnowFlow RAG Agent
 │  │  ├─ exam/                 # 试卷批改 Agent
@@ -319,7 +335,8 @@ MentorHub/
 │  │  ├─ reranker.py           # BGE Reranker
 │  │  ├─ query_classifier.py   # QA Query 二分类
 │  │  ├─ memory.py             # 多轮上下文与摘要
-│  │  ├─ parsers/              # Parser Registry / MinerU / Markdown 图片解析
+│  │  ├─ runtime_settings.py   # 管理员运行时检索 / API 设置
+│  │  ├─ parsers/              # Parser Registry / MinerU / Markdown+HTML 图片解析
 │  │  └─ retry.py              # 重试 / 降级
 │  ├─ mcp/
 │  │  ├─ knowledge_base_server.py
@@ -333,6 +350,8 @@ MentorHub/
 │  ├─ build_knowledge_base.py
 │  ├─ mineru_parse_worker.py   # 独立 MinerU 环境解析 Worker
 │  ├─ test_document_extract.py # 文档解析独立 smoke test
+│  ├─ manual_tests/
+│  │  └─ test_document_ingestion.py # Parser + Chunking 人工质量检查
 │  ├─ ollama_image_understanding_worker.py # 流程图视觉理解实验
 │  ├─ seed_data.py
 │  └─ seed_standard_exam.py
@@ -464,7 +483,7 @@ python scripts/seed_standard_exam.py
 当前 `scripts/build_knowledge_base.py` 通过脚本底部常量配置导入参数。首次使用前修改：
 
 ```python
-FILE_PATH = r"<PDF 或 Markdown 文档路径>"
+FILE_PATH = r"<PDF / HTML / Markdown / Office 文档路径>"
 COURSE_ID = "<课程 UUID>"
 DOCUMENT_ID = None
 TENANT_ID = "tenant_default"
@@ -477,14 +496,30 @@ USE_CONTEXT = False
 python scripts/build_knowledge_base.py
 ```
 
-入库阶段会先经过 Parser Registry。Markdown 会保留标题结构并解析其中的图片引用；PDF / 图片 / Office 等复杂文档优先交给 MinerU。解析后的内容统一包装为 LangChain `Document(page_content + metadata)`，再进行 Chunking、BGE-M3 Dense 编码和 BM25 稀疏权重构建。
+入库阶段会先经过 Parser Registry。Markdown 会保留标题结构并解析图片引用；PDF / 图片 / Office / HTML 等复杂文档优先交给 MinerU。HTML 会额外解析原始 `<img>` 引用并复用图片增强链路；Markdown / HTML 中的 fenced code 会进入 Code-aware Chunking。解析后的内容统一包装为 LangChain `Document(page_content + metadata)`，再进行 BGE-M3 Dense 编码和 BM25 稀疏权重构建。
 
 当前默认关闭 Contextual RAG，避免为每个 chunk 额外调用 LLM 产生较高成本。需要时可显式设置 `USE_CONTEXT=True` 开启上下文增强。
 
-如只想测试“文档能否正确提取”，不执行 Embedding / BM25 / Milvus，可运行：
+如只想人工检查 **Parser + Chunking** 质量，不执行 Embedding / BM25 / Milvus，可使用：
 
 ```bash
-python scripts/test_document_extract.py "<文档路径>" --preview 3000
+python scripts/manual_tests/test_document_ingestion.py "<文档路径>"
+```
+
+常用参数：
+
+```bash
+# 完整解析文本
+python scripts/manual_tests/test_document_ingestion.py "<文档路径>" --full-text
+
+# 完整文本 + 全部 Chunk
+python scripts/manual_tests/test_document_ingestion.py "<文档路径>" --full-text --full-chunks --max-chunks 0
+```
+
+Windows 下若通过 Conda 执行并出现中文输出乱码，建议禁用 Conda 的 stdout 捕获：
+
+```powershell
+conda run --no-capture-output -n EduAgent python scripts\manual_tests\test_document_ingestion.py "<文档路径>" --full-text
 ```
 
 ### 8. 启动后端
@@ -542,6 +577,8 @@ http://localhost:3000
 /api/v1/exam
 /api/v1/resume
 /api/v1/interview
+/api/v1/settings
+/api/v1/knowledge
 ```
 
 项目同时挂载两个 MCP 子应用：
@@ -557,10 +594,22 @@ http://localhost:3000
 
 ## 测试
 
-Parser 与 KnowFlow Iterative Retrieval：
+Parser / 文档入库与 QA Retrieval：
 
 ```bash
-pytest tests/parsers/test_document_parsers.py tests/qa/test_iterative_retrieval.py -q
+pytest tests/parsers tests/qa -q
+```
+
+完整后端回归：
+
+```bash
+python -m pytest tests -q
+```
+
+人工检查任意文档的最终解析文本与 Chunk：
+
+```bash
+python scripts/manual_tests/test_document_ingestion.py "<文档路径>" --full-text --full-chunks --max-chunks 0
 ```
 
 ResumePilot：
@@ -575,7 +624,7 @@ pytest tests/resume -q
 pytest tests/interview -q
 ```
 
-此外，`backend/api/v1/` 下保留了部分业务 E2E 验证脚本，可用于单独检查 QA、Exam、Resume、Interview 等链路。
+此外，`backend/api/v1/` 下保留了部分业务 E2E 验证脚本，可用于单独检查 QA、Exam、Resume、Interview 等链路；GitHub CI 会执行后端测试、前端构建与 Compose 配置检查。
 
 ---
 
@@ -587,9 +636,11 @@ MentorHub 仍处于持续开发阶段。README 以当前仓库代码为准，重
 
 - **Contextual RAG**：代码保留，但默认关闭，只在需要时显式开启；
 - **MinerU**：只用于离线知识入库，不进入在线 QA 请求链路；
-- **Markdown 图片**：普通 OCR / 文本型图片已进入正式入库链路；
+- **Markdown / HTML 图片**：已进入正式入库链路，优先 Advanced 图像解析，低价值结果可降级 OCR；源图片不存在时明确记录失败，不生成伪造描述；
+- **Code-aware Chunking**：Markdown / HTML 代码块使用独立的更大窗口，并保留代码围栏、缩进、语言与章节信息；
+- **Runtime Settings**：管理员可热更新 QA Top-K、置信度、Gap Retrieval、LLM 与 Web Search 配置；当前使用本地 `.runtime_settings.json` overlay，适合单实例部署；
 - **复杂流程图 / 架构图**：节点关系恢复仍在优化，`scripts/ollama_image_understanding_worker.py` 属于实验代码，目前未作为默认生产能力接入；
-- **Parent-Child Retrieval**：当前没有启用，现阶段仍使用 Heading-aware Chunking + Hybrid Retrieval + Rerank。
+- **Parent-Child Retrieval**：当前没有启用，现阶段使用 Heading/Code-aware Chunking + Hybrid Retrieval + Rerank + Sufficiency/Gap Retrieval。
 
 如果运行环境、模型或基础设施配置发生变化，请优先检查：
 

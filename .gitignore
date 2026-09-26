@@ -74,6 +74,7 @@ pnpm-debug.log*
 # ===== 9. 本地工具产物 =====
 docs/
 data/mineru/
+data/knowledge_uploads/
 .codegraph/
 .superpowers/
 .reasonix/
@@ -89,3 +90,4 @@ site/
 .tests/read.md
 .tests/交接.md
 docs/对比ragflow.md
+AGENTS.md
