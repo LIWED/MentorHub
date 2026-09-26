@@ -84,3 +84,8 @@ docker-compose-backup.yml
 *.log
 logs/
 site/
+
+# 其他文件
+.tests/read.md
+.tests/交接.md
+docs/对比ragflow.md

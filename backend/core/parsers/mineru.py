@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from langchain_core.documents import Document
 
@@ -37,6 +39,7 @@ _IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 )
 _MODEL_EXTENSIONS = frozenset({".pdf"}) | _IMAGE_EXTENSIONS
+_HEADING_ANCHOR_RE = re.compile(r"\s*\[¶\]\([^)]*\)\s*$")
 
 
 class MinerUUnavailableError(RuntimeError):
@@ -99,6 +102,10 @@ def _block_to_markdown(block: dict) -> tuple[str, str]:
     if not text:
         return block_type, ""
 
+    if block_type in {"doc_title", "paragraph_title", "section_title"}:
+        heading_text = _HEADING_ANCHOR_RE.sub("", text).strip()
+        prefix = "#" if block_type == "doc_title" else "##"
+        return block_type, f"{prefix} {heading_text}"
     if "equation" in block_type or "formula" in block_type:
         return "formula", f"[公式]\n{text}"
     if "table" in block_type:
@@ -121,6 +128,7 @@ class MinerUParser(DocumentParser):
         tier: str | None = None,
         output_root: str | Path | None = None,
         timeout_seconds: int | None = None,
+        html_image_resolver=None,
     ):
         settings = get_settings()
         self.python_executable = (
@@ -138,6 +146,7 @@ class MinerUParser(DocumentParser):
         self.worker_script = (
             Path(__file__).resolve().parents[3] / "scripts" / "mineru_parse_worker.py"
         )
+        self._html_image_resolver = html_image_resolver
 
     def _effective_tier(self, path: Path) -> str:
         # MinerU 4 对 Office/OpenDocument/HTML/CSV 等原生文档固定走 Flash。
@@ -304,6 +313,136 @@ class MinerUParser(DocumentParser):
             )
         ]
 
+    @staticmethod
+    def _html_image_anchor_candidates(alt: str, target: str) -> list[str]:
+        candidates: list[str] = []
+        for value in (alt.strip(),):
+            if value and value not in candidates:
+                candidates.append(value)
+
+        parsed = urlparse(target)
+        target_path = unquote(parsed.path or target)
+        stem = Path(target_path).stem.strip()
+        if stem and stem not in candidates:
+            candidates.append(stem)
+        return candidates
+
+    @classmethod
+    def _inject_html_image_enrichments(cls, docs: list[Document], enrichments) -> None:
+        """
+        将 HTML 原图的解析文本尽量放回 MinerU Markdown 中对应图片附近。
+
+        MinerU Flash 对 HTML 的正文/代码提取很好，但通常只保留图片 alt/文件名。
+        这里复用 Markdown 图片解析链得到的 VLM/OCR 文本；若无法定位锚点，
+        则追加到文档末尾的“图片补充信息”区域，避免丢失可检索内容。
+        """
+        if not docs or not enrichments:
+            return
+
+        seen: set[tuple[str, str]] = set()
+        pending_blocks: list[str] = []
+        for item in enrichments:
+            key = (item.target, item.text)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            label = item.alt.strip() or Path(unquote(urlparse(item.target).path)).stem or "未命名图片"
+            block = (
+                f"\n\n[图片内容：{label}]\n"
+                f"{item.text.strip()}\n"
+                f"[/图片内容]"
+            )
+            if any(item.text.strip() in doc.page_content for doc in docs):
+                continue
+
+            inserted = False
+            for anchor in cls._html_image_anchor_candidates(item.alt, item.target):
+                if len(anchor) < 3:
+                    continue
+                for doc in docs:
+                    position = doc.page_content.find(anchor)
+                    if position < 0:
+                        continue
+                    insert_at = position + len(anchor)
+                    doc.page_content = (
+                        doc.page_content[:insert_at]
+                        + block
+                        + doc.page_content[insert_at:]
+                    )
+                    inserted = True
+                    break
+                if inserted:
+                    break
+
+            if not inserted:
+                pending_blocks.append(block.strip())
+
+        if pending_blocks:
+            docs[-1].page_content = (
+                docs[-1].page_content.rstrip()
+                + "\n\n## 图片补充信息\n\n"
+                + "\n\n".join(pending_blocks)
+            )
+
+    def _enrich_html_images(
+        self,
+        path: Path,
+        docs: list[Document],
+        *,
+        document_id: str | None,
+    ):
+        if path.suffix.lower() not in {".html", ".htm"}:
+            return None
+
+        try:
+            raw_html = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning(
+                "mineru.html_image_source_read_failed",
+                source=str(path),
+                error=str(exc),
+            )
+            return None
+
+        from backend.core.parsers.markdown_images import MarkdownImageResolver
+
+        if not MarkdownImageResolver.contains_images(raw_html):
+            return None
+
+        resolver = self._html_image_resolver or MarkdownImageResolver()
+        resolution = resolver.enrich(
+            raw_html,
+            path,
+            document_id=document_id or path.stem,
+        )
+        self._inject_html_image_enrichments(docs, resolution.enrichments)
+
+        for doc in docs:
+            doc.metadata.update(
+                {
+                    "image_count": resolution.image_count,
+                    "image_enriched_count": resolution.enriched_count,
+                    "image_failed_count": resolution.failed_count,
+                    "image_low_value_count": resolution.low_value_count,
+                    "image_fallback_count": resolution.fallback_count,
+                    "image_tier": resolution.image_tier,
+                }
+            )
+            if resolution.asset_dir:
+                doc.metadata["html_image_asset_dir"] = str(resolution.asset_dir)
+
+        logger.info(
+            "mineru.html_images_done",
+            source=str(path),
+            images=resolution.image_count,
+            enriched=resolution.enriched_count,
+            failed=resolution.failed_count,
+            low_value=resolution.low_value_count,
+            fallback=resolution.fallback_count,
+        )
+        return resolution
+
     def parse(
         self,
         file_path: str | Path,
@@ -327,6 +466,23 @@ class MinerUParser(DocumentParser):
                 f"MinerU 已执行但未生成可入库内容：{output_dir}"
             )
 
+        html_image_resolution = self._enrich_html_images(
+            path,
+            docs,
+            document_id=document_id,
+        )
+
+        image_metadata = {}
+        if html_image_resolution is not None:
+            image_metadata = {
+                "image_count": html_image_resolution.image_count,
+                "image_enriched_count": html_image_resolution.enriched_count,
+                "image_failed_count": html_image_resolution.failed_count,
+                "image_low_value_count": html_image_resolution.low_value_count,
+                "image_fallback_count": html_image_resolution.fallback_count,
+                "image_tier": html_image_resolution.image_tier,
+            }
+
         return ParsedDocument(
             source_path=path,
             documents=docs,
@@ -337,5 +493,6 @@ class MinerUParser(DocumentParser):
             metadata={
                 "tier": self._effective_tier(path),
                 "document_id": document_id,
+                **image_metadata,
             },
         )
