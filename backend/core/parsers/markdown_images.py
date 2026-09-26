@@ -4,7 +4,7 @@ import hashlib
 import ipaddress
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urljoin, urlparse
@@ -108,6 +108,16 @@ class _CachedImageResult:
     used_fallback: bool = False
 
 
+@dataclass(frozen=True)
+class ImageEnrichment:
+    """单个图片引用成功提取出的可检索文本。"""
+
+    alt: str
+    target: str
+    text: str
+    used_fallback: bool = False
+
+
 @dataclass
 class MarkdownImageResolution:
     text: str
@@ -118,6 +128,7 @@ class MarkdownImageResolution:
     fallback_count: int = 0
     asset_dir: Path | None = None
     image_tier: str = _DEFAULT_IMAGE_TIER
+    enrichments: list[ImageEnrichment] = field(default_factory=list)
 
 
 class MarkdownImageResolver:
@@ -559,6 +570,7 @@ class MarkdownImageResolver:
         failed_count = 0
         low_value_count = 0
         fallback_count = 0
+        enrichments: list[ImageEnrichment] = []
         cursor = 0
         parts: list[str] = []
 
@@ -605,6 +617,14 @@ class MarkdownImageResolver:
             if result.text:
                 parts.append(self._format_enrichment(ref.alt, result.text))
                 enriched_count += 1
+                enrichments.append(
+                    ImageEnrichment(
+                        alt=ref.alt,
+                        target=ref.target,
+                        text=result.text,
+                        used_fallback=result.used_fallback,
+                    )
+                )
                 if result.used_fallback:
                     fallback_count += 1
             elif result.low_value:
@@ -623,4 +643,5 @@ class MarkdownImageResolver:
             fallback_count=fallback_count,
             asset_dir=asset_root,
             image_tier=self.image_tier,
+            enrichments=enrichments,
         )

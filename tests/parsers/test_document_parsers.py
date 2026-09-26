@@ -7,7 +7,7 @@ from backend.core.parsers.base import ParsedDocument
 from backend.core.parsers.markdown_images import MarkdownImageResolver
 from backend.core.parsers.mineru import MinerUParser
 from backend.core.parsers.native import MarkdownParser
-from scripts.build_knowledge_base import split_documents
+from scripts.build_knowledge_base import split_documents, split_markdown_documents
 
 
 class FakeImageParser:
@@ -206,6 +206,112 @@ def test_markdown_html_img_is_enriched(tmp_path: Path):
     assert fake_parser.calls == [image_path.resolve()]
 
 
+def test_html_mineru_output_is_enriched_with_source_images(tmp_path: Path):
+    image_dir = tmp_path / "assets"
+    image_dir.mkdir()
+    image_path = image_dir / "react-flow.png"
+    image_path.write_bytes(b"fake-png")
+    source = tmp_path / "lesson.html"
+    source.write_text(
+        '<h1>ReAct</h1><p>执行流程如下：</p>'
+        '<img src="assets/react-flow.png" alt="ReAct执行流程">',
+        encoding="utf-8",
+    )
+
+    fake_parser = FakeImageParser(
+        "Thought → Action → Observation → Thought"
+    )
+    resolver = MarkdownImageResolver(
+        image_parser=fake_parser,
+        output_root=tmp_path / "image-analysis",
+    )
+    parser = MinerUParser(
+        html_image_resolver=resolver,
+        output_root=tmp_path / "mineru",
+    )
+    docs = [
+        Document(
+            page_content="# ReAct\n\n执行流程如下：\n\nReAct执行流程",
+            metadata={
+                "parser": "mineru",
+                "content_format": "markdown",
+            },
+        )
+    ]
+
+    resolution = parser._enrich_html_images(
+        source,
+        docs,
+        document_id="html-react",
+    )
+
+    assert resolution is not None
+    assert resolution.image_count == 1
+    assert resolution.enriched_count == 1
+    assert resolution.failed_count == 0
+    assert "[图片内容：ReAct执行流程]" in docs[0].page_content
+    assert "Thought → Action → Observation" in docs[0].page_content
+    assert docs[0].metadata["image_enriched_count"] == 1
+    assert fake_parser.calls == [image_path.resolve()]
+
+
+def test_code_aware_chunking_preserves_code_fences_and_indentation():
+    code = "\n\n".join(
+        [
+            (
+                f"def tool_{index}(value):\n"
+                f"    # tool {index}\n"
+                f"    result = value + {index}\n"
+                f"    return result"
+            )
+            for index in range(18)
+        ]
+    )
+    doc = Document(
+        page_content=(
+            "# ReAct 实现\n\n"
+            "下面是完整工具代码。\n\n"
+            "[代码]\n"
+            f"```python\n{code}\n```\n\n"
+            "代码执行完成后进入 Observation。"
+        ),
+        metadata={
+            "source": "lesson.html",
+            "source_name": "lesson",
+            "parser": "mineru",
+            "content_format": "markdown",
+        },
+    )
+
+    chunks = split_markdown_documents(
+        [doc],
+        chunk_size=200,
+        chunk_overlap=40,
+        code_chunk_size=500,
+        code_chunk_overlap=60,
+    )
+    code_chunks = [
+        chunk for chunk in chunks
+        if chunk.metadata.get("chunk_type") == "code"
+    ]
+    text_chunks = [
+        chunk for chunk in chunks
+        if chunk.metadata.get("chunk_type") == "text"
+    ]
+
+    assert len(code_chunks) > 1
+    assert text_chunks
+    assert all(
+        chunk.page_content.startswith("[代码]\n```python\n")
+        and chunk.page_content.rstrip().endswith("```")
+        for chunk in code_chunks
+    )
+    assert all("    return result" in chunk.page_content for chunk in code_chunks)
+    assert all(chunk.metadata.get("code_language") == "python" for chunk in code_chunks)
+    assert all(chunk.metadata.get("H1") == "ReAct 实现" for chunk in code_chunks)
+    assert any("ReAct 实现" in chunk.metadata.get("source_name", "") for chunk in chunks)
+
+
 def test_markdown_placeholder_only_image_is_not_enriched(tmp_path: Path):
     image_path = tmp_path / "flow.png"
     image_path.write_bytes(b"fake-png")
@@ -290,6 +396,8 @@ def test_mineru_structured_content_preserves_rich_blocks(tmp_path: Path):
             {
                 "page_idx": 0,
                 "blocks": [
+                    {"type": "doc_title", "content": "RAG 课程"},
+                    {"type": "paragraph_title", "content": "检索架构[¶](#retrieval)"},
                     {"type": "text", "content": "这是正文"},
                     {"type": "formula", "content": "E = mc^2"},
                     {"type": "table", "content": "|模型|得分|\n|A|90|"},
@@ -308,6 +416,8 @@ def test_mineru_structured_content_preserves_rich_blocks(tmp_path: Path):
 
     assert len(docs) == 1
     text = docs[0].page_content
+    assert "# RAG 课程" in text
+    assert "## 检索架构" in text
     assert "这是正文" in text
     assert "[公式]" in text and "E = mc^2" in text
     assert "[表格]" in text and "|模型|得分|" in text

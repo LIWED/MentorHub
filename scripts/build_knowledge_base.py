@@ -1,28 +1,35 @@
 # scripts/build_knowledge_base.py（阶段版：文档加载 + 分块，5.4 / 5.5 继续补全）
 
+import re
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
     MarkdownTextSplitter,
 )
 
 # ── 模块级分块器单例 ──────────────────────────────────────────
-_MD_HEADER_SPLITTER = MarkdownHeaderTextSplitter(
-    headers_to_split_on=[
-        ("#",   "H1"),
-        ("##",  "H2"),
-        ("###", "H3"),
-        ("####", "H4"),
-    ],
-    strip_headers=False,
-)
-
 _CHAR_SPLITTER = RecursiveCharacterTextSplitter(
     chunk_size=512,
     chunk_overlap=100,
     separators=["\n\n", "\n", "。", "，", " ", ""],
+)
+
+_FENCED_CODE_RE = re.compile(
+    r"(?ms)"
+    r"(?:^\[代码\][ \t]*\n)?"
+    r"^```(?P<language>[^\n`]*)\n"
+    r"(?P<body>.*?)"
+    r"^```[ \t]*(?=\n|$)"
+)
+
+
+_MD_HEADING_RE = re.compile(
+    r"^(?P<marks>#{1,4})[ \t]+(?P<title>.+?)[ \t]*$"
+)
+_CODE_FENCE_LINE_RE = re.compile(r"^[ \t]*```")
+_PYTHON_TOP_LEVEL_RE = re.compile(
+    r"^(?:async[ \t]+def|def|class)[ \t]+[A-Za-z_]\w*"
 )
 
 
@@ -77,23 +84,239 @@ def split_pdf_documents(pages: list[Document]) -> list[Document]:
 
 # ── Markdown 分块 ─────────────────────────────────────────────
 
+def _split_markdown_headings_preserving_code(doc: Document) -> list[Document]:
+    """按 H1-H4 拆分 Markdown，同时原样保留 fenced code 的缩进。"""
+    sections: list[Document] = []
+    hierarchy: dict[str, str] = {}
+    current_metadata = dict(doc.metadata)
+    buffer: list[str] = []
+    in_code = False
+
+    def flush() -> None:
+        if not buffer:
+            return
+        content = "".join(buffer).strip()
+        if content:
+            sections.append(
+                Document(
+                    page_content=content,
+                    metadata=dict(current_metadata),
+                )
+            )
+        buffer.clear()
+
+    for line in doc.page_content.splitlines(keepends=True):
+        line_without_eol = line.rstrip("\r\n")
+
+        if _CODE_FENCE_LINE_RE.match(line_without_eol):
+            in_code = not in_code
+            buffer.append(line)
+            continue
+
+        heading = _MD_HEADING_RE.match(line_without_eol) if not in_code else None
+        if heading:
+            flush()
+            level = len(heading.group("marks"))
+            hierarchy[f"H{level}"] = heading.group("title").strip()
+            for deeper in range(level + 1, 5):
+                hierarchy.pop(f"H{deeper}", None)
+            current_metadata = {**doc.metadata, **hierarchy}
+            buffer.append(line)
+            continue
+
+        buffer.append(line)
+
+    flush()
+    return sections
+
+
+def _split_python_code_preserving_top_level(
+    body: str,
+    *,
+    chunk_size: int,
+    fallback_splitter: RecursiveCharacterTextSplitter,
+) -> list[str]:
+    """优先在 Python 顶层 def/class 边界切分；超长函数才继续内部切分。"""
+    lines = body.splitlines(keepends=True)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if _PYTHON_TOP_LEVEL_RE.match(line)
+    ]
+    if not starts:
+        return fallback_splitter.split_text(body)
+
+    segments: list[str] = []
+    if starts[0] > 0:
+        preamble = "".join(lines[:starts[0]]).strip("\n")
+        if preamble:
+            segments.append(preamble)
+
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(lines)
+        segment = "".join(lines[start:end]).strip("\n")
+        if segment:
+            segments.append(segment)
+
+    parts: list[str] = []
+    current = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        if current:
+            parts.append(current)
+            current = ""
+
+    for segment in segments:
+        if len(segment) > chunk_size:
+            flush_current()
+            parts.extend(fallback_splitter.split_text(segment))
+            continue
+
+        if not current:
+            current = segment
+            continue
+
+        candidate = f"{current}\n\n{segment}"
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            flush_current()
+            current = segment
+
+    flush_current()
+    return parts
+
+
+def _split_markdown_section_code_aware(
+    section: Document,
+    *,
+    text_chunk_size: int,
+    text_chunk_overlap: int,
+    code_chunk_size: int,
+    code_chunk_overlap: int,
+) -> list[Document]:
+    """
+    在单个 Markdown 标题区间内分离 prose / fenced code。
+
+    普通文字继续使用较小窗口；代码块用更大的窗口，并尽量按空行/行边界切，
+    避免原来的 MarkdownTextSplitter 在 512 字符处直接截断函数或代码示例。
+    """
+    text = section.page_content
+    matches = list(_FENCED_CODE_RE.finditer(text))
+    if not matches:
+        splitter = MarkdownTextSplitter(
+            chunk_size=text_chunk_size,
+            chunk_overlap=text_chunk_overlap,
+        )
+        chunks = splitter.create_documents(
+            [text],
+            metadatas=[dict(section.metadata)],
+        )
+        for chunk in chunks:
+            chunk.metadata["chunk_type"] = "text"
+        return chunks
+
+    text_splitter = MarkdownTextSplitter(
+        chunk_size=text_chunk_size,
+        chunk_overlap=text_chunk_overlap,
+    )
+    code_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=code_chunk_size,
+        chunk_overlap=code_chunk_overlap,
+        separators=[
+            "\n\nclass ",
+            "\n\nasync def ",
+            "\n\ndef ",
+            "\n\n",
+            "\n",
+            " ",
+            "",
+        ],
+    )
+
+    chunks: list[Document] = []
+
+    def append_text_segment(segment: str) -> None:
+        segment = segment.strip()
+        if not segment:
+            return
+        docs = text_splitter.create_documents(
+            [segment],
+            metadatas=[dict(section.metadata)],
+        )
+        for doc in docs:
+            doc.metadata["chunk_type"] = "text"
+        chunks.extend(docs)
+
+    cursor = 0
+    for match in matches:
+        append_text_segment(text[cursor:match.start()])
+
+        language = match.group("language").strip()
+        body = match.group("body").strip("\n")
+        if len(body) <= code_chunk_size:
+            code_parts = [body]
+        elif language.lower() in {"python", "py"}:
+            code_parts = _split_python_code_preserving_top_level(
+                body,
+                chunk_size=code_chunk_size,
+                fallback_splitter=code_splitter,
+            )
+        else:
+            code_parts = code_splitter.split_text(body)
+
+        total_parts = len(code_parts)
+        for part_index, part in enumerate(code_parts):
+            fenced = f"```{language}\n{part.rstrip()}\n```"
+            chunks.append(
+                Document(
+                    page_content=f"[代码]\n{fenced}",
+                    metadata={
+                        **section.metadata,
+                        "chunk_type": "code",
+                        "code_language": language or "text",
+                        "code_split_strategy": (
+                            "python_top_level"
+                            if language.lower() in {"python", "py"}
+                            else "generic"
+                        ),
+                        "code_part_index": part_index,
+                        "code_part_total": total_parts,
+                    },
+                )
+            )
+        cursor = match.end()
+
+    append_text_segment(text[cursor:])
+    return chunks
+
+
 def split_markdown_documents(
     docs: list[Document],
-    chunk_size: int = 512,      # 代码类内容默认 1200，纯文字可调低到 600~800
+    chunk_size: int = 512,
     chunk_overlap: int = 100,
+    code_chunk_size: int = 1200,
+    code_chunk_overlap: int = 120,
 ) -> list[Document]:
-    """Markdown 文档分块：MarkdownHeaderTextSplitter + MarkdownTextSplitter 两阶段"""
-    splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    """Markdown 分块：先按标题，再对正文与 fenced code 使用不同窗口。"""
 
     header_chunks: list[Document] = []
     for doc in docs:
-        sections = _MD_HEADER_SPLITTER.split_text(doc.page_content)
-        for section in sections:
-            # MinerU 的 page / block_types / asset_dir 等元数据必须继续向下游传播。
-            section.metadata.update(doc.metadata)
+        sections = _split_markdown_headings_preserving_code(doc)
         header_chunks.extend(sections)
 
-    final_chunks = splitter.split_documents(header_chunks)
+    final_chunks: list[Document] = []
+    for section in header_chunks:
+        final_chunks.extend(
+            _split_markdown_section_code_aware(
+                section,
+                text_chunk_size=chunk_size,
+                text_chunk_overlap=chunk_overlap,
+                code_chunk_size=code_chunk_size,
+                code_chunk_overlap=code_chunk_overlap,
+            )
+        )
 
     for chunk in final_chunks:
         source_path = chunk.metadata.get("source", "")
