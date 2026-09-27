@@ -74,6 +74,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         "ON knowledge_documents (tenant_id, status)",
     ),
     (
+        "qa_messages.citations",
+        "ALTER TABLE qa_messages "
+        "ADD COLUMN IF NOT EXISTS citations JSONB NOT NULL DEFAULT '[]'::jsonb",
+    ),
+    (
         "exam_submissions.weak_points",
         "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS weak_points JSONB",
     ),

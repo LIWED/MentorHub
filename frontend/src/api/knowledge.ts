@@ -39,6 +39,69 @@ export interface KnowledgeUploadResult {
   sitemap_used: boolean
 }
 
+export interface KnowledgeChunkPreview {
+  id: string
+  content: string
+  chunk_index: number
+  source_name: string
+  chunk_type: string
+  document_type: string
+  relative_path: string
+  chapter: string
+  section: string
+  heading_path: string
+  retrieval_text: string
+}
+
+export interface RetrievalTestItem {
+  rank: number
+  content: string
+  score: number
+  source_name: string
+  document_id: string
+  relative_path: string
+  chapter: string
+  section: string
+  heading_path: string
+  chunk_index: number
+  chunk_type: string
+}
+
+export interface RetrievalChainStep {
+  name: string
+  label: string
+  elapsed_ms: number
+  summary: string
+  details: Record<string, unknown>
+}
+
+export interface RetrievalCallTrace {
+  query: string
+  elapsed_ms: number
+  filter_expr: string
+  candidate_count: number
+  ranked_count: number
+  confidence: number
+  recall_top_k: number
+  rerank_top_k: number
+}
+
+export interface RetrievalTestResponse {
+  query: string
+  status: string
+  strategy: string
+  rewritten_query: string
+  metadata_scope: Record<string, string>
+  scope_source: string
+  confidence: number
+  evidence_count: number
+  total_ms: number
+  steps: RetrievalChainStep[]
+  final_evidence: RetrievalTestItem[]
+  retrieval_calls: RetrievalCallTrace[]
+  runtime_config: Record<string, number>
+}
+
 export const knowledgeApi = {
   listCourses: () => client.get<KnowledgeCourse[]>('/knowledge/courses'),
   listAvailableCourses: () =>
@@ -55,6 +118,23 @@ export const knowledgeApi = {
 
   listDocuments: (courseId: string) =>
     client.get<KnowledgeDocument[]>(`/knowledge/courses/${courseId}/documents`),
+
+  previewChunks: (documentId: string, limit = 200) =>
+    client.get<KnowledgeChunkPreview[]>(
+      `/knowledge/documents/${documentId}/chunks`,
+      { params: { limit } },
+    ),
+
+  retrievalTest: (data: {
+    query: string
+    course_id?: string | null
+    document_id?: string | null
+    enable_web_search?: boolean
+  }) =>
+    client.post<RetrievalTestResponse>('/knowledge/retrieval-test', data, {
+      // 全链路可能包含 Query Rewrite / HyDE / Sufficiency / Gap Retrieval 的 LLM 调用。
+      timeout: 0,
+    }),
 
   uploadDocuments: (
     courseId: string,

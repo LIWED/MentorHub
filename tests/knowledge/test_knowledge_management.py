@@ -141,6 +141,42 @@ def test_document_update_deletes_old_chunks_before_upsert(monkeypatch):
     assert events[1] == ("upsert", ["other", "target"])
 
 
+def test_bm25_rebuild_prefers_hierarchy_retrieval_text(monkeypatch):
+    from backend.core.knowledge_base import BM25SparseEncoder, KnowledgeBaseClient
+
+    client = object.__new__(KnowledgeBaseClient)
+    existing = [_chunk("other", "raw-existing")]
+    existing[0].retrieval_text = "标题层级：项目介绍 > 背景\n\nraw-existing"
+    new_chunks = [_chunk("target", "raw-new")]
+    new_chunks[0].retrieval_text = "标题层级：项目介绍 > 架构\n\nraw-new"
+    captured: list[str] = []
+
+    monkeypatch.setattr(
+        client,
+        "list_chunks",
+        lambda exclude_document_id=None: existing,
+    )
+    monkeypatch.setattr(client, "delete_document_chunks", lambda document_id: None)
+    monkeypatch.setattr(client, "upsert_chunks", lambda chunks: len(chunks))
+
+    def fake_encode_documents(cls, texts):
+        captured.extend(texts)
+        return [{1: 1.0} for _ in texts]
+
+    monkeypatch.setattr(
+        BM25SparseEncoder,
+        "encode_documents",
+        classmethod(fake_encode_documents),
+    )
+
+    client.upsert_with_bm25_rebuild(new_chunks)
+
+    assert captured == [
+        existing[0].retrieval_text,
+        new_chunks[0].retrieval_text,
+    ]
+
+
 def test_document_delete_rebuilds_remaining_bm25(monkeypatch):
     from backend.core.knowledge_base import KnowledgeBaseClient
 

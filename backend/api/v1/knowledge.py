@@ -75,6 +75,57 @@ class UploadBatchView(BaseModel):
     sitemap_used: bool
 
 
+class ChunkPreviewItem(BaseModel):
+    id: str
+    content: str
+    chunk_index: int
+    source_name: str = ""
+    chunk_type: str = "text"
+    document_type: str = ""
+    relative_path: str = ""
+    chapter: str = ""
+    section: str = ""
+    heading_path: str = ""
+    retrieval_text: str = ""
+
+
+class RetrievalTestRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    course_id: str | None = None
+    document_id: str | None = None
+    enable_web_search: bool = False
+
+
+class RetrievalTestItem(BaseModel):
+    rank: int
+    content: str
+    score: float
+    source_name: str = ""
+    document_id: str = ""
+    relative_path: str = ""
+    chapter: str = ""
+    section: str = ""
+    heading_path: str = ""
+    chunk_index: int = 0
+    chunk_type: str = "text"
+
+
+class RetrievalTestResponse(BaseModel):
+    query: str
+    status: str
+    strategy: str
+    rewritten_query: str
+    metadata_scope: dict
+    scope_source: str
+    confidence: float
+    evidence_count: int
+    total_ms: float
+    steps: list[dict]
+    final_evidence: list[RetrievalTestItem]
+    retrieval_calls: list[dict]
+    runtime_config: dict
+
+
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(
@@ -604,6 +655,98 @@ async def list_documents(
             {"course_id": course_id, "tenant_id": tenant_id},
         )
         return [_row_to_document(row) for row in result.mappings().all()]
+
+
+@router.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[ChunkPreviewItem],
+)
+async def preview_document_chunks(
+    document_id: str,
+    limit: int = 200,
+    current_user: dict = Depends(require_admin),
+) -> list[ChunkPreviewItem]:
+    tenant_id = current_user["tenant_id"]
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT id, status
+                FROM knowledge_documents
+                WHERE id = :document_id AND tenant_id = :tenant_id
+                """
+            ),
+            {"document_id": document_id, "tenant_id": tenant_id},
+        )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        if row["status"] != "completed":
+            raise HTTPException(status_code=409, detail="文档尚未完成入库")
+
+    chunks = await asyncio.to_thread(
+        KnowledgeBaseClient().get_document_chunks,
+        document_id,
+        tenant_id,
+        limit=max(1, min(limit, 500)),
+    )
+    return [ChunkPreviewItem(**chunk) for chunk in chunks]
+
+
+@router.post("/retrieval-test", response_model=RetrievalTestResponse)
+async def retrieval_test(
+    payload: RetrievalTestRequest,
+    current_user: dict = Depends(require_admin),
+) -> RetrievalTestResponse:
+    """管理员运行完整检索决策链；停在生成回答前，不写聊天记录。"""
+    from backend.agents.qa.retrieval_debug import run_retrieval_debug_chain
+
+    tenant_id = current_user["tenant_id"]
+
+    async with AsyncSessionLocal() as session:
+        if payload.course_id:
+            course = await session.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM knowledge_courses
+                    WHERE id = :course_id AND tenant_id = :tenant_id
+                    """
+                ),
+                {"course_id": payload.course_id, "tenant_id": tenant_id},
+            )
+            if not course.first():
+                raise HTTPException(status_code=404, detail="课程不存在")
+
+        if payload.document_id:
+            sql = """
+                SELECT id, course_id
+                FROM knowledge_documents
+                WHERE id = :document_id
+                  AND tenant_id = :tenant_id
+                  AND status = 'completed'
+            """
+            params = {
+                "document_id": payload.document_id,
+                "tenant_id": tenant_id,
+            }
+            if payload.course_id:
+                sql += " AND course_id = :course_id"
+                params["course_id"] = payload.course_id
+            document = await session.execute(text(sql), params)
+            document_row = document.mappings().first()
+            if not document_row:
+                raise HTTPException(status_code=404, detail="可检索文档不存在")
+
+    result = await run_retrieval_debug_chain(
+        query=payload.query,
+        tenant_id=tenant_id,
+        student_id=current_user["user_id"],
+        course_id=payload.course_id,
+        document_id=payload.document_id,
+        enable_web_search=payload.enable_web_search,
+    )
+    return RetrievalTestResponse(query=payload.query, **result)
 
 
 @router.post(

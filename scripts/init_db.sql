@@ -285,6 +285,7 @@ CREATE TABLE IF NOT EXISTS qa_messages (
     role        VARCHAR(16) NOT NULL CHECK (role IN ('user', 'assistant')),
     content     TEXT NOT NULL,
     sources     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    citations   JSONB NOT NULL DEFAULT '[]'::jsonb,
     answer_mode VARCHAR(32),
     confidence  DOUBLE PRECISION,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()

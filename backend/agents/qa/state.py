@@ -62,6 +62,7 @@ class QAState(TypedDict):
     # ── ⑤ 生成结果 & 控制标记──────────────────────────────────────
     answer:            str           # 最终回答文本
     sources:           list[str]     # 来源标注列表（高置信度 RAG 时填充）
+    citations:         list[dict]    # 结构化证据：来源路径 / section / chunk / score / excerpt
     answer_mode:       str           # "rag" / "llm_direct"
     existing_summary:  Optional[str] # 当前会话的历史摘要（从 DB 读取）
     should_summarize:  bool          # 是否触发摘要压缩

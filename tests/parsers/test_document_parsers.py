@@ -62,6 +62,31 @@ def test_markdown_parser_and_splitter_keep_heading_context(tmp_path: Path):
     assert all(chunk.metadata.get("content_format") == "markdown" for chunk in chunks)
 
 
+def test_consecutive_headings_do_not_create_heading_only_chunk():
+    doc = Document(
+        page_content=(
+            "# 1.1 项目介绍\n\n"
+            "## 一、背景介绍\n\n"
+            "这里是真正的项目背景正文。"
+        ),
+        metadata={
+            "source": "1.1 项目介绍.html",
+            "source_name": "1.1 项目介绍",
+            "parser": "mineru",
+            "content_format": "markdown",
+        },
+    )
+
+    chunks = split_markdown_documents([doc], chunk_size=512, chunk_overlap=100)
+
+    assert chunks
+    assert all(chunk.page_content.strip() != "# 1.1 项目介绍" for chunk in chunks)
+    assert chunks[0].metadata["H1"] == "1.1 项目介绍"
+    assert chunks[0].metadata["H2"] == "一、背景介绍"
+    assert chunks[0].metadata["heading_path"] == "1.1 项目介绍 > 一、背景介绍"
+    assert "这里是真正的项目背景正文" in chunks[0].page_content
+
+
 def test_markdown_local_image_is_enriched_and_survives_chunking(tmp_path: Path):
     image_dir = tmp_path / "images"
     image_dir.mkdir()

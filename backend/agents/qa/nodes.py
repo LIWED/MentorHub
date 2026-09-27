@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import time
 import uuid
 
 from sqlalchemy import text
@@ -314,6 +315,7 @@ async def classify_query_node(state: QAState) -> dict:
         "gap_queries": [],
         "gap_round": 0,
         "max_gap_rounds": _qa_runtime().max_gap_rounds,
+        "citations": [],
         "fallback_used": False,
     }
     if auto_web and not state.get("enable_web_search", False):
@@ -584,7 +586,7 @@ async def _retrieve_queries_with_scope(
     若 soft document scope 下所有 Query 都 0 召回，则整组统一放宽到
     tenant/course hard scope 后重试，避免 BROAD/ITERATIVE 混用不同范围。
     """
-    from backend.core.reranker import retrieve
+    from backend.core.reranker import retrieve, retrieve_debug
 
     tenant_id = state["tenant_id"]
     course_id = state.get("course_id")
@@ -597,20 +599,59 @@ async def _retrieve_queries_with_scope(
         "course" if course_id else "tenant"
     )
     loop = asyncio.get_running_loop()
+    debug_traces = state.get("_debug_retrieval_traces")
 
     async def run(current_scope: dict):
         async def retrieve_one(search_query: str):
-            docs, confidence = await loop.run_in_executor(
-                None,
-                lambda: retrieve(
-                    search_query,
-                    tenant_id,
-                    course_id,
-                    metadata_scope=current_scope,
-                    recall_top_k=recall_top_k,
-                    rerank_top_k=rerank_top_k,
-                ),
-            )
+            started = time.perf_counter()
+            if isinstance(debug_traces, list):
+                trace = await loop.run_in_executor(
+                    None,
+                    lambda: retrieve_debug(
+                        search_query,
+                        tenant_id,
+                        course_id,
+                        metadata_scope=current_scope,
+                        recall_top_k=recall_top_k,
+                        rerank_top_k=rerank_top_k,
+                    ),
+                )
+                docs, confidence = trace.ranked_docs, trace.confidence
+                debug_traces.append(
+                    {
+                        "query": search_query,
+                        "elapsed_ms": round(
+                            (time.perf_counter() - started) * 1000,
+                            2,
+                        ),
+                        "filter_expr": trace.filter_expr,
+                        "candidate_count": len(trace.candidates),
+                        "candidates": trace.candidates,
+                        "ranked_docs": [
+                            {
+                                "content": doc.content,
+                                "score": doc.score,
+                                "metadata": doc.metadata,
+                            }
+                            for doc in trace.ranked_docs
+                        ],
+                        "confidence": trace.confidence,
+                        "recall_top_k": recall_top_k,
+                        "rerank_top_k": rerank_top_k,
+                    }
+                )
+            else:
+                docs, confidence = await loop.run_in_executor(
+                    None,
+                    lambda: retrieve(
+                        search_query,
+                        tenant_id,
+                        course_id,
+                        metadata_scope=current_scope,
+                        recall_top_k=recall_top_k,
+                        rerank_top_k=rerank_top_k,
+                    ),
+                )
             return search_query, docs, confidence
 
         return await asyncio.gather(*[
@@ -1004,6 +1045,7 @@ async def iterative_retrieve_node(state: QAState) -> dict:
     ranked_chunks = [
         {
             "content": doc.content,
+            "retrieval_text": doc.retrieval_text,
             "score": doc.score,
             "metadata": doc.metadata,
         }
@@ -1122,6 +1164,7 @@ async def retrieve_node(state: QAState) -> dict:
         broad_candidates = [
             {
                 "content": doc.content,
+                "retrieval_text": doc.retrieval_text,
                 "metadata": doc.metadata,
             }
             for doc in seen.values()
@@ -1153,6 +1196,7 @@ async def retrieve_node(state: QAState) -> dict:
     ranked_chunks = [
         {
             "content": doc.content,
+            "retrieval_text": doc.retrieval_text,
             "score": doc.score,
             "metadata": doc.metadata,
         }
@@ -1226,6 +1270,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
         if content and key not in seen:
             evidence_pool.append({
                 "content": content,
+                "retrieval_text": chunk.get("retrieval_text") or content,
                 "score": chunk.get("score", 0.0),
                 "metadata": chunk.get("metadata", {}),
             })
@@ -1236,6 +1281,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
         if doc.content and key not in seen:
             evidence_pool.append({
                 "content": doc.content,
+                "retrieval_text": doc.retrieval_text,
                 "score": doc.score,
                 "metadata": doc.metadata,
             })
@@ -1267,6 +1313,7 @@ async def hyde_retrieve_node(state: QAState) -> dict:
     ranked_chunks = [
         {
             "content": doc.content,
+            "retrieval_text": doc.retrieval_text,
             "score": doc.score,
             "metadata": doc.metadata,
         }
@@ -1320,10 +1367,12 @@ def _format_sufficiency_evidence(chunks: list[dict]) -> str:
     for idx, chunk in enumerate(chunks[:_qa_runtime().rerank_evidence_top_k], 1):
         metadata = chunk.get("metadata") or {}
         source = metadata.get("source_name") or "课程文档"
+        heading_path = metadata.get("heading_path") or ""
         score = float(chunk.get("score") or 0.0)
         content = (chunk.get("content") or "")[:1200]
+        heading_label = f"｜heading={heading_path}" if heading_path else ""
         parts.append(
-            f"【证据{idx}｜source={source}｜score={score:.4f}】\n{content}"
+            f"【证据{idx}｜source={source}{heading_label}｜score={score:.4f}】\n{content}"
         )
     return "\n\n".join(parts)
 
@@ -1478,6 +1527,7 @@ async def gap_retrieve_node(state: QAState) -> dict:
         for doc in docs:
             chunk = {
                 "content": doc.content,
+                "retrieval_text": doc.retrieval_text,
                 "score": doc.score,
                 "metadata": doc.metadata,
                 "trigger_query": search_query,
@@ -1561,6 +1611,7 @@ async def rerank_evidence_node(state: QAState) -> dict:
     ranked_chunks = [
         {
             "content": doc.content,
+            "retrieval_text": doc.retrieval_text,
             "score": doc.score,
             "metadata": doc.metadata,
         }
@@ -1587,12 +1638,32 @@ async def rerank_evidence_node(state: QAState) -> dict:
 # 节点：generate_rag — 高置信度 RAG 生成
 # ──────────────────────────────────────────────────────────────
 
+def _build_rag_citations(ranked_chunks: list[dict]) -> list[dict]:
+    """把最终生成上下文转成前端可直接展示的结构化证据。"""
+    citations: list[dict] = []
+    for index, chunk in enumerate(ranked_chunks, 1):
+        metadata = chunk.get("metadata") or {}
+        content = (chunk.get("content") or "").strip()
+        citations.append({
+            "citation_id": index,
+            "source_name": metadata.get("source_name") or "课程文档",
+            "document_id": metadata.get("document_id") or "",
+            "relative_path": metadata.get("relative_path") or "",
+            "chapter": metadata.get("chapter") or "",
+            "section": metadata.get("section") or "",
+            "chunk_index": int(metadata.get("chunk_index") or 0),
+            "chunk_type": metadata.get("chunk_type") or "text",
+            "score": round(float(chunk.get("score") or 0.0), 4),
+            "excerpt": content[:700],
+        })
+    return citations
+
 async def generate_rag_node(state: QAState) -> dict:
     """
     高置信度 RAG 生成节点。
 
     将精排后的 Top-3 文档拼成 context，让 LLM 严格基于知识库内容回答。
-    回答末尾附加 📚 参考来源，支持历史摘要注入保持多轮连贯性。
+    同时返回结构化 citations，供前端展示证据路径、Chunk 与相关性分数。
     """
     # Sufficiency 判断可以看更宽的 Top-6 证据窗口；真正生成时只保留
     # Final Context Top-K，减少噪音和上下文成本。
@@ -1605,8 +1676,13 @@ async def generate_rag_node(state: QAState) -> dict:
     context_parts = []
     sources = []
     for i, chunk in enumerate(ranked_chunks, 1):
-        context_parts.append(f"【参考{i}】\n{chunk['content']}")
-        source_name = chunk.get("metadata", {}).get("source_name", "课程文档")
+        metadata = chunk.get("metadata", {})
+        source_name = metadata.get("source_name", "课程文档")
+        heading_path = metadata.get("heading_path") or ""
+        context_label = heading_path or source_name
+        context_parts.append(
+            f"【参考{i}】\n位置：{context_label}\n{chunk['content']}"
+        )
         if source_name not in sources:
             sources.append(source_name)
 
@@ -1630,8 +1706,8 @@ async def generate_rag_node(state: QAState) -> dict:
     response = await llm.ainvoke(llm_messages)
     answer_text = _get_message_content(response).strip()
 
-    sources_text = "\n".join([f"  • {s}" for s in sources])
-    final_answer = f"{answer_text}\n\n📚 **参考来源**\n{sources_text}"
+    citations = _build_rag_citations(ranked_chunks)
+    final_answer = answer_text
 
     logger.info(
         "generate_rag.done",
@@ -1643,6 +1719,7 @@ async def generate_rag_node(state: QAState) -> dict:
     return {
         "answer":      final_answer,
         "sources":     sources,
+        "citations":   citations,
         "answer_mode": "rag",
         "messages":    [AIMessage(content=final_answer)],
         "should_summarize": should_trigger_summary(
@@ -1651,6 +1728,7 @@ async def generate_rag_node(state: QAState) -> dict:
         "structured_output": {
             "answer":      final_answer,
             "sources":     sources,
+            "citations":   citations,
             "confidence":  state.get("confidence", 0),
             "answer_mode": "rag",
         },

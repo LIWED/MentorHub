@@ -33,12 +33,26 @@ class ChatRequest(BaseModel):
     enable_web_search: bool       = Field(False, description="低置信度时是否先走 Web Search 再给 LLM")
 
 
+class CitationView(BaseModel):
+    citation_id: int
+    source_name: str
+    document_id: str = ""
+    relative_path: str = ""
+    chapter: str = ""
+    section: str = ""
+    chunk_index: int = 0
+    chunk_type: str = "text"
+    score: float = 0.0
+    excerpt: str = ""
+
+
 class ChatResponse(BaseModel):
     session_id:    str
     answer:        str
     answer_mode:   str        # "rag" / "web_augmented" / "llm_direct" / "general"
     confidence:    float
     sources:       list[str]
+    citations:     list[CitationView] = Field(default_factory=list)
     fallback_used: bool
 
 
@@ -47,6 +61,7 @@ class SessionMessage(BaseModel):
     content:    str
     created_at: str
     sources:    list[str] = Field(default_factory=list)
+    citations:  list[CitationView] = Field(default_factory=list)
     answer_mode: str | None = None
     confidence: float | None = None
 
@@ -112,6 +127,7 @@ async def _save_qa_message(
     role: str,
     content: str,
     sources: list[str] | None = None,
+    citations: list[dict] | None = None,
     answer_mode: str | None = None,
     confidence: float | None = None,
 ) -> None:
@@ -123,10 +139,11 @@ async def _save_qa_message(
                 sa_text("""
                     INSERT INTO qa_messages
                         (id, tenant_id, student_id, session_id, thread_id,
-                         role, content, sources, answer_mode, confidence)
+                         role, content, sources, citations, answer_mode, confidence)
                     VALUES
                         (:id, :tenant_id, :student_id, :session_id, :thread_id,
-                         :role, :content, CAST(:sources AS JSONB), :answer_mode, :confidence)
+                         :role, :content, CAST(:sources AS JSONB),
+                         CAST(:citations AS JSONB), :answer_mode, :confidence)
                 """),
                 {
                     "id": str(uuid.uuid4()),
@@ -137,6 +154,7 @@ async def _save_qa_message(
                     "role": role,
                     "content": content,
                     "sources": json.dumps(sources or [], ensure_ascii=False),
+                    "citations": json.dumps(citations or [], ensure_ascii=False),
                     "answer_mode": answer_mode,
                     "confidence": confidence,
                 },
@@ -277,6 +295,7 @@ async def chat(
             role="assistant",
             content=result.get("answer", ""),
             sources=result.get("sources", []),
+            citations=result.get("citations", []),
             answer_mode=result.get("answer_mode", "llm_direct"),
             confidence=result.get("confidence", 0.0),
         )
@@ -302,6 +321,7 @@ async def chat(
         answer_mode=result.get("answer_mode", "llm_direct"),
         confidence=result.get("confidence", 0.0),
         sources=result.get("sources", []),
+        citations=result.get("citations", []),
         fallback_used=result.get("fallback_used", False),
     )
 
@@ -373,6 +393,7 @@ async def chat_stream(
         answer_mode = "llm_direct"
         confidence = 0.0
         sources: list[str] = []
+        citations: list[dict] = []
         answer_parts: list[str] = []
         first_token_seen = False
         graph_started = time.perf_counter()
@@ -419,6 +440,8 @@ async def chat_stream(
                             answer_mode = output["answer_mode"]
                         if output.get("sources") is not None:
                             sources = output["sources"]
+                        if output.get("citations") is not None:
+                            citations = output["citations"]
                         _conf = (output.get("structured_output") or {}).get("confidence")
                         if _conf is not None:
                             confidence = _conf
@@ -453,6 +476,7 @@ async def chat_stream(
                     role="assistant",
                     content=answer_text,
                     sources=sources,
+                    citations=citations,
                     answer_mode=answer_mode,
                     confidence=confidence,
                 )
@@ -484,6 +508,7 @@ async def chat_stream(
                     "answer_mode": answer_mode,
                     "confidence": confidence,
                     "sources": sources,
+                    "citations": citations,
                     "timing": timing_payload,
                 },
                 ensure_ascii=False,
@@ -551,7 +576,8 @@ async def get_session_history(
 
         msg_result = await db.execute(
             sa_text("""
-                SELECT role, content, sources, answer_mode, confidence, created_at
+                SELECT role, content, sources, citations,
+                       answer_mode, confidence, created_at
                 FROM qa_messages
                 WHERE thread_id = :tid AND student_id = :sid
                 ORDER BY created_at ASC, id ASC
@@ -565,9 +591,10 @@ async def get_session_history(
             role=row[0],
             content=row[1],
             sources=list(row[2] or []),
-            answer_mode=row[3],
-            confidence=row[4],
-            created_at=row[5].isoformat() if row[5] else "",
+            citations=list(row[3] or []),
+            answer_mode=row[4],
+            confidence=row[5],
+            created_at=row[6].isoformat() if row[6] else "",
         )
         for row in rows
     ]
