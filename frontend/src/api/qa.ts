@@ -12,6 +12,19 @@ export interface QATiming {
   nodes: QANodeTiming[]
 }
 
+export interface QACitation {
+  citation_id: number
+  source_name: string
+  document_id: string
+  relative_path: string
+  chapter: string
+  section: string
+  chunk_index: number
+  chunk_type: string
+  score: number
+  excerpt: string
+}
+
 export interface ChatRequest {
   session_id: string
   course_id?: string | null
@@ -25,6 +38,7 @@ export interface ChatResponse {
   answer_mode: 'rag' | 'web_augmented' | 'llm_direct' | 'general'
   confidence: number
   sources: string[]
+  citations: QACitation[]
   fallback_used: boolean
 }
 
@@ -33,6 +47,7 @@ export interface HistoryMessage {
   content: string
   created_at: string
   sources: string[]
+  citations: QACitation[]
   answer_mode?: string | null
   confidence?: number | null
 }

@@ -8,9 +8,9 @@ MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将�
 
 | 模块 | 主要能力 | 关键实现 |
 | --- | --- | --- |
-| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、Metadata Scoped Search、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、MCP Web Search、Memory |
-| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、代码感知分块 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、HTML Image Enrichment、Code-aware Chunking、BGE-M3 + BM25 |
-| **Knowledge Management · 知识库管理** | 管理员创建/删除课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、启动恢复、重新解析/删除、课程级级联清理 |
+| **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、Metadata Scoped Search、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、Citation / Evidence Trace、MCP Web Search、Memory |
+| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、代码感知分块 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、HTML Image Enrichment、Hierarchy-aware / Code-aware Chunking、BGE-M3 + BM25 |
+| **Knowledge Management · 知识库管理** | 管理员创建/删除课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、启动恢复、Chunk Preview、Retrieval Testing、重新解析/删除 |
 | **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
 | **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
 | **Interview · 模拟面试** | 多阶段技术面试、回答评价、追问与最终报告 | LangGraph 状态流转、分阶段对话、回答评估、会话记忆 |
@@ -47,6 +47,14 @@ QA Agent 首先将问题区分为：
 - 当 Query 唯一、明确命中文档文件名/相对路径时，可增加 Soft Document Scope；若该范围 0 召回，只移除这一层文档限制后在同一课程内重试；
 - 新入库 Chunk 同时保存 `document_type / relative_path / chapter / section`，为后续更细粒度过滤与 Citation 做准备。
 
+### Hierarchy-aware Retrieval
+
+- 连续标题（例如 H1 后立即 H2）不会再生成只有标题文字的独立 Chunk；
+- 每个 Chunk 保留 `heading_path`，例如 `1.1 项目介绍 > 一、背景介绍`；
+- 额外构造 `retrieval_text = 文档路径 + 标题层级 + 原始正文`，Dense Embedding、BM25 和 BGE Reranker 都使用这份检索文本；
+- 最终 RAG / Citation 仍使用原始 `content`，因此标题增强只改善召回，不会污染回答正文；
+- Chunk Preview 可展开查看“实际检索文本”，方便直接验证层级信息是否真正参与检索。
+
 ### Hybrid Retrieval
 
 当前代码中的混合检索方案为：
@@ -82,6 +90,15 @@ Query
 当前把 **相关性（Relevance）** 与 **证据充分性（Sufficiency）** 分开处理：Reranker Top-1 分数负责判断“检索结果是否相关”，默认经验阈值为 **0.75**；相关性不足时先触发 HyDE，Direct Retrieval 与 HyDE Retrieval 合并后仍使用真实 Query 做全局 Rerank。相关性通过后，再由 Sufficiency Judge 判断“当前证据是否足够回答”；若不足，只针对缺失信息生成 Gap Query 并补搜。默认最多生成 **2 个 Gap Query**、执行 **2 轮 Gap Retrieval**，新旧证据合并去重后全局 Rerank，再次判断 Sufficiency。达到轮次上限仍不足时，再根据联网开关进入 Web Search 或有限证据生成路径。
 
 以上 Recall / Rerank / Final Top-K、置信度阈值和 Gap Retrieval 上限均可在管理员 `/settings` 页面运行时修改，无需重启后端。
+
+### Citation / Evidence Trace
+
+- RAG 最终答案使用的 Final Context Top-K 会同步生成结构化 Citation；
+- Citation 保留来源文件、相对路径、章节/Section、Chunk Index、Chunk Type、Reranker Score 与证据摘要；
+- Prompt 要求正文使用 `【1】【2】` 与证据编号对应，前端可折叠查看原始证据；
+- Citation 会随 QA 消息一起持久化，历史会话重新打开后仍可核对证据。
+
+管理员知识库页面同时提供 **Chunk Preview** 与 **Retrieval Testing**：前者直接查看某文档实际写入 Milvus 的 Chunk；后者复用正式 QA 检索决策链，依次展示问题分类、Query Rewrite、Metadata Scope、SINGLE/BROAD/ITERATIVE 路由、Hybrid + Reranker、Quality Gate、HyDE、Evidence Sufficiency 与 Gap Retrieval。每一步显示关键结果与耗时，并可展开查看 Query、Scope、置信度、缺口与实际 Filter。测试会调用检索链所需的 LLM 判断节点，但不会生成最终回答、不会写聊天历史，也不会真的执行 Web Search。
 
 ### 多轮记忆
 

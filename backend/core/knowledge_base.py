@@ -177,6 +177,8 @@ class DocumentChunk:
     relative_path: str = ""
     chapter: str = ""
     section: str = ""
+    heading_path: str = ""
+    retrieval_text: str = ""
     updated_at: int = field(default_factory=lambda: int(time.time()))
 
 
@@ -227,6 +229,8 @@ class KnowledgeBaseClient:
                 "relative_path": c.relative_path,
                 "chapter": c.chapter,
                 "section": c.section,
+                "heading_path": c.heading_path,
+                "retrieval_text": (c.retrieval_text or c.content)[:8192],
                 "updated_at": c.updated_at,
             }
             for c in chunks
@@ -257,7 +261,7 @@ class KnowledgeBaseClient:
                 "id", "embedding", "sparse_embedding", "content", "chunk_index",
                 "document_id", "course_id", "tenant_id", "source_name",
                 "chunk_type", "version", "document_type", "relative_path",
-                "chapter", "section", "updated_at",
+                "chapter", "section", "heading_path", "retrieval_text", "updated_at",
             ],
             limit=16384,
         )
@@ -278,6 +282,8 @@ class KnowledgeBaseClient:
                 relative_path=row.get("relative_path", "") or "",
                 chapter=row.get("chapter", "") or "",
                 section=row.get("section", "") or "",
+                heading_path=row.get("heading_path", "") or "",
+                retrieval_text=row.get("retrieval_text", "") or "",
                 updated_at=row.get("updated_at", int(time.time())),
             )
             for row in rows
@@ -294,7 +300,9 @@ class KnowledgeBaseClient:
         document_id = new_chunks[0].document_id
         existing = self.list_chunks(exclude_document_id=document_id)
         corpus = existing + new_chunks
-        sparse_vectors = BM25SparseEncoder.encode_documents([c.content for c in corpus])
+        sparse_vectors = BM25SparseEncoder.encode_documents(
+            [c.retrieval_text or c.content for c in corpus]
+        )
         for chunk, sparse in zip(corpus, sparse_vectors):
             chunk.sparse_embedding = sparse
 
@@ -325,7 +333,7 @@ class KnowledgeBaseClient:
             return
 
         sparse_vectors = BM25SparseEncoder.encode_documents(
-            [chunk.content for chunk in remaining]
+            [chunk.retrieval_text or chunk.content for chunk in remaining]
         )
         for chunk, sparse in zip(remaining, sparse_vectors):
             chunk.sparse_embedding = sparse
@@ -365,7 +373,7 @@ class KnowledgeBaseClient:
             return
 
         sparse_vectors = BM25SparseEncoder.encode_documents(
-            [chunk.content for chunk in remaining]
+            [chunk.retrieval_text or chunk.content for chunk in remaining]
         )
         for chunk, sparse in zip(remaining, sparse_vectors):
             chunk.sparse_embedding = sparse
@@ -374,6 +382,51 @@ class KnowledgeBaseClient:
             "knowledge_base.bm25_rebuilt_after_course_delete",
             course_id=course_id,
             remaining_chunks=len(remaining),
+        )
+
+    def get_document_chunks(
+        self,
+        document_id: str,
+        tenant_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict]:
+        """按 chunk_index 读取单个文档的轻量 Chunk 预览，不返回向量字段。"""
+        safe_document = document_id.replace('"', '\\"')
+        safe_tenant = tenant_id.replace('"', '\\"')
+        rows = self._client.query(
+            collection_name=COLLECTION_NAME,
+            filter=(
+                f'document_id == "{safe_document}" '
+                f'and tenant_id == "{safe_tenant}"'
+            ),
+            output_fields=[
+                "id", "content", "chunk_index", "source_name", "chunk_type",
+                "course_id", "document_id", "document_type", "relative_path",
+                "chapter", "section", "heading_path", "retrieval_text",
+            ],
+            limit=max(1, min(int(limit), 500)),
+        )
+        return sorted(
+            [
+                {
+                    "id": row.get("id") or "",
+                    "content": row.get("content") or "",
+                    "chunk_index": int(row.get("chunk_index") or 0),
+                    "source_name": row.get("source_name") or "",
+                    "chunk_type": row.get("chunk_type") or "text",
+                    "course_id": row.get("course_id") or "",
+                    "document_id": row.get("document_id") or "",
+                    "document_type": row.get("document_type") or "",
+                    "relative_path": row.get("relative_path") or "",
+                    "chapter": row.get("chapter") or "",
+                    "section": row.get("section") or "",
+                    "heading_path": row.get("heading_path") or "",
+                    "retrieval_text": row.get("retrieval_text") or "",
+                }
+                for row in rows
+            ],
+            key=lambda item: item["chunk_index"],
         )
 
     @staticmethod
@@ -414,6 +467,7 @@ class KnowledgeBaseClient:
                     "content", "source_name", "chunk_type",
                     "course_id", "document_id", "chunk_index",
                     "document_type", "relative_path", "chapter", "section",
+                    "heading_path", "retrieval_text",
                 ],
             )
 
@@ -423,6 +477,11 @@ class KnowledgeBaseClient:
                 candidates.append(
                     {
                         "content": entity.get("content") or "",
+                        "retrieval_text": (
+                            entity.get("retrieval_text")
+                            or entity.get("content")
+                            or ""
+                        ),
                         "score": hit.get("distance") or 0.0,
                         "metadata": {
                             "source_name": entity.get("source_name") or "",
@@ -434,6 +493,7 @@ class KnowledgeBaseClient:
                             "relative_path": entity.get("relative_path") or "",
                             "chapter": entity.get("chapter") or "",
                             "section": entity.get("section") or "",
+                            "heading_path": entity.get("heading_path") or "",
                         },
                     }
                 )

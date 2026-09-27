@@ -257,8 +257,11 @@ async def test_explicit_document_scope_never_relaxes(monkeypatch):
 def test_embed_chunks_carries_document_and_section_metadata(monkeypatch):
     from scripts import build_knowledge_base as builder
 
+    captured_texts = []
+
     class _FakeEmbedder:
         def encode(self, texts, batch_size=12):
+            captured_texts.extend(texts)
             return [[0.1, 0.2] for _ in texts]
 
     monkeypatch.setattr(
@@ -293,3 +296,12 @@ def test_embed_chunks_carries_document_and_section_metadata(monkeypatch):
     assert result[0].relative_path == "② 核心技术基础/2.4 ReAct.html"
     assert result[0].chapter == "2.4 大模型核心技术ReAct"
     assert result[0].section == "四、代码实现 > 工具定义"
+    assert result[0].heading_path == (
+        "2.4 大模型核心技术ReAct > 四、代码实现 > 工具定义"
+    )
+    assert result[0].content == "ReAct code"
+    assert result[0].retrieval_text.startswith(
+        "文档：② 核心技术基础/2.4 ReAct.html\n"
+        "标题层级：2.4 大模型核心技术ReAct > 四、代码实现 > 工具定义"
+    )
+    assert captured_texts == [result[0].retrieval_text]

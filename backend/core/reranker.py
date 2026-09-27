@@ -22,6 +22,17 @@ class RankedDocument:
     score:          float  # BGE-Reranker 输出的相关性概率 [0, 1]
     original_index: int    # 在原始召回列表中的位置（0 起）
     metadata:       dict   # 来源元数据（source_name / chunk_type / course_id 等）
+    retrieval_text: str = ""  # 仅用于检索/精排；最终回答仍使用 raw content
+
+
+@dataclass
+class RetrievalTrace:
+    """一次 Hybrid + Rerank 的可观测结果。"""
+
+    candidates: list[dict]
+    ranked_docs: list[RankedDocument]
+    confidence: float
+    filter_expr: str
 
 
 class BGEReranker:
@@ -122,9 +133,17 @@ class BGEReranker:
         if not documents:
             return [], 0.0
 
-        # CrossEncoder 输入：(query, document) 对，截断过长文档
+        # CrossEncoder 优先使用 hierarchy-aware retrieval_text；
+        # 老数据没有该字段时自动回退 raw content。
         pairs = [
-            (query, (doc.get("content") or "")[:RERANK_MAX_INPUT_CHARS])
+            (
+                query,
+                (
+                    doc.get("retrieval_text")
+                    or doc.get("content")
+                    or ""
+                )[:RERANK_MAX_INPUT_CHARS],
+            )
             for doc in documents
         ]
         # print(f'pairs[0]: {pairs[0]}')
@@ -142,6 +161,10 @@ class BGEReranker:
                     score=scores[i],
                     original_index=i,
                     metadata=documents[i].get("metadata", {}),
+                    retrieval_text=(
+                        documents[i].get("retrieval_text")
+                        or documents[i].get("content", "")
+                    ),
                 )
                 for i in range(len(documents))
             ],
@@ -190,15 +213,34 @@ def retrieve(
         ranked_docs:  精排后 Top-rerank_top_k 文档
         confidence:   Top-1 文档的 BGE 置信度 [0, 1]
     """
-    from backend.core.knowledge_base import BGEMEmbedder, KnowledgeBaseClient  # 延迟导入，避免循环依赖
+    trace = retrieve_debug(
+        query=query,
+        tenant_id=tenant_id,
+        course_id=course_id,
+        recall_top_k=recall_top_k,
+        rerank_top_k=rerank_top_k,
+        metadata_scope=metadata_scope,
+    )
+    return trace.ranked_docs, trace.confidence
 
-    # ── 第一步：向量化（在 Pipeline 内部完成，调用方无需感知）──────
+
+def retrieve_debug(
+    query: str,
+    tenant_id: str,
+    course_id: Optional[str] = None,
+    recall_top_k: int = 10,
+    rerank_top_k: int = 3,
+    *,
+    metadata_scope: Optional[dict] = None,
+) -> RetrievalTrace:
+    """复用正式检索链路，并额外返回候选池与实际 Milvus filter。"""
+    from backend.core.knowledge_base import BGEMEmbedder, KnowledgeBaseClient
+
     embedder = BGEMEmbedder.get_instance()
     dense_vec = embedder.encode_query(query)
 
-    # ── 第二步：Hybrid 召回 ─────────────────────────────────────────
     kb = KnowledgeBaseClient()
-    filters = kb._build_filter(
+    filter_expr = kb._build_filter(
         tenant_id,
         course_id,
         metadata_scope=metadata_scope,
@@ -207,16 +249,30 @@ def retrieve(
         query_text=query,
         query_embedding=dense_vec,
         top_k=recall_top_k,
-        filters=filters,
+        filters=filter_expr,
     )
 
     if not candidates:
         logger.info("retrieve.empty", query_preview=query[:50])
-        return [], 0.0
+        return RetrievalTrace(
+            candidates=[],
+            ranked_docs=[],
+            confidence=0.0,
+            filter_expr=filter_expr,
+        )
 
-    # ── 第三步：精排 ────────────────────────────────────────────────
     reranker = BGEReranker.get_instance()
-    return reranker.rerank_with_confidence(query, candidates, top_k=rerank_top_k)
+    ranked_docs, confidence = reranker.rerank_with_confidence(
+        query,
+        candidates,
+        top_k=rerank_top_k,
+    )
+    return RetrievalTrace(
+        candidates=candidates,
+        ranked_docs=ranked_docs,
+        confidence=confidence,
+        filter_expr=filter_expr,
+    )
 
 
 if __name__ == '__main__':

@@ -32,6 +32,40 @@ _PYTHON_TOP_LEVEL_RE = re.compile(
     r"^(?:async[ \t]+def|def|class)[ \t]+[A-Za-z_]\w*"
 )
 
+def _is_heading_only_markdown(text: str) -> bool:
+    """只有 Markdown 标题/空行的 section 不应独立成为可检索 Chunk。"""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return bool(lines) and all(_MD_HEADING_RE.match(line) for line in lines)
+
+
+def _build_heading_path(metadata: dict) -> str:
+    """把 H1-H4 统一压成可用于检索和展示的层级路径。"""
+    parts = [
+        str(metadata.get(f"H{level}") or "").strip()
+        for level in range(1, 5)
+    ]
+    return " > ".join(part for part in parts if part)
+
+
+def build_retrieval_text(
+    chunk: Document,
+    *,
+    relative_path: str = "",
+) -> str:
+    """构造只用于 Dense/BM25/Reranker 的层级增强文本。"""
+    heading_path = (
+        chunk.metadata.get("heading_path")
+        or _build_heading_path(chunk.metadata)
+    )
+    context_lines: list[str] = []
+    if relative_path:
+        context_lines.append(f"文档：{relative_path}")
+    if heading_path:
+        context_lines.append(f"标题层级：{heading_path}")
+    if not context_lines:
+        return chunk.page_content
+    return "\n".join(context_lines) + "\n\n" + chunk.page_content
+
 
 # ── 文档加载（5.2 内容，此处合并为完整文件）────────────────────
 
@@ -96,7 +130,7 @@ def _split_markdown_headings_preserving_code(doc: Document) -> list[Document]:
         if not buffer:
             return
         content = "".join(buffer).strip()
-        if content:
+        if content and not _is_heading_only_markdown(content):
             sections.append(
                 Document(
                     page_content=content,
@@ -331,6 +365,7 @@ def split_markdown_documents(
             chunk.metadata.get("H4", ""),
         ]
         parts = [p for p in parts if p]
+        chunk.metadata["heading_path"] = " > ".join(parts)
         chunk.metadata["source_name"] = (
             f"{filename} > {' > '.join(parts)}" if parts else filename
         )
@@ -413,10 +448,15 @@ def embed_chunks(
     total = len(chunks)
     for batch_start in range(0, total, BATCH_SIZE):
         batch = chunks[batch_start: batch_start + BATCH_SIZE]
-        texts = [c.page_content for c in batch]
+        retrieval_texts = [
+            build_retrieval_text(c, relative_path=relative_path)
+            for c in batch
+        ]
         # BGE-M3 只负责 Dense；BM25 sparse 在写入前按当前全库语料计算
-        dense_vecs = embedder.encode(texts, batch_size=BATCH_SIZE)
-        for i, (chunk, dense) in enumerate(zip(batch, dense_vecs)):
+        dense_vecs = embedder.encode(retrieval_texts, batch_size=BATCH_SIZE)
+        for i, (chunk, dense, retrieval_text) in enumerate(
+            zip(batch, dense_vecs, retrieval_texts)
+        ):
             global_index = batch_start + i    # 在整个文档中的顺序编号
             section_parts = [
                 chunk.metadata.get("H2", ""),
@@ -441,6 +481,11 @@ def embed_chunks(
                 relative_path=relative_path,
                 chapter=chunk.metadata.get("H1", "") or "",
                 section=section,
+                heading_path=(
+                    chunk.metadata.get("heading_path")
+                    or _build_heading_path(chunk.metadata)
+                ),
+                retrieval_text=retrieval_text,
             ))
 
         done = min(batch_start + BATCH_SIZE, total)

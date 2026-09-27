@@ -56,9 +56,13 @@
           v-for="(msg, i) in messages"
           :key="i"
           :role="msg.role"
-          :sources="msg.sources"
+          :sources="msg.citations?.length ? [] : msg.sources"
         >
           <MarkdownRenderer :content="msg.content" />
+          <QAEvidenceDetails
+            v-if="msg.citations?.length"
+            :citations="msg.citations"
+          />
           <QATimingDetails v-if="msg.timing" :timing="msg.timing" />
         </ChatBubble>
 
@@ -179,9 +183,10 @@ import { ElMessage } from 'element-plus'
 import ChatBubble from '@/components/chat/ChatBubble.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import QATimingDetails from '@/components/qa/QATimingDetails.vue'
+import QAEvidenceDetails from '@/components/qa/QAEvidenceDetails.vue'
 import { useAuthStore } from '@/stores/auth'
 import { qaApi } from '@/api/qa'
-import type { QATiming } from '@/api/qa'
+import type { QACitation, QATiming } from '@/api/qa'
 import { knowledgeApi, type KnowledgeCourse } from '@/api/knowledge'
 import { useResizableInput } from '@/composables/useResizableInput'
 import iconQa from '@/assets/images/icon_qa.jpg'
@@ -198,6 +203,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: string[]
+  citations?: QACitation[]
   timing?: QATiming
 }
 
@@ -226,6 +232,7 @@ const progressStage = ref('')
 const lastAnswerMode = ref('')
 const lastConfidence = ref(0)
 const lastSources = ref<string[]>([])
+const lastCitations = ref<QACitation[]>([])
 const lastTiming = ref<QATiming | undefined>()
 
 // Web Search 开关
@@ -275,6 +282,7 @@ async function switchSession(id: string) {
         role: m.role,
         content: m.content,
         sources: m.sources ?? [],
+        citations: m.citations ?? [],
       }))
       s.loaded = true
     } catch (err) {
@@ -339,6 +347,7 @@ async function sendMessage() {
   progressStage.value = ''
   lastAnswerMode.value = ''
   lastSources.value = []
+  lastCitations.value = []
   lastTiming.value = undefined
 
   try {
@@ -393,6 +402,7 @@ async function sendMessage() {
             lastAnswerMode.value = evt.answer_mode ?? ''
             lastConfidence.value = Math.round((evt.confidence ?? 0) * 100)
             lastSources.value = evt.sources ?? []
+            lastCitations.value = evt.citations ?? []
             lastTiming.value = evt.timing ?? undefined
           } else if (evt.type === 'error') {
             throw new Error(evt.message ?? 'SSE error')
@@ -408,6 +418,7 @@ async function sendMessage() {
         role: 'assistant',
         content: streamingText.value,
         sources: lastSources.value,
+        citations: lastCitations.value,
         timing: lastTiming.value,
       }
       messages.value.push(assistantMsg)
