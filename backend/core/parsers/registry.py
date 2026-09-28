@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.config import get_settings
 from backend.core.logger import get_logger
 from backend.core.parsers.base import DocumentParser, ParsedDocument
+from backend.core.parsers.colab_dev import ColabDevParser
 from backend.core.parsers.mineru import (
     MINERU_EXTENSIONS,
     MinerUParseError,
@@ -21,7 +23,16 @@ class ParserRegistry:
     def __init__(self):
         self.markdown = MarkdownParser()
         self.text = TextParser()
-        self.mineru = MinerUParser()
+        parser_mode = (get_settings().parser_mode or "local").strip().lower()
+        if parser_mode == "colab_dev":
+            self.mineru = ColabDevParser()
+        elif parser_mode == "local":
+            self.mineru = MinerUParser()
+        else:
+            raise ValueError(
+                f"不支持的 PARSER_MODE：{parser_mode}，"
+                "当前仅支持 local / colab_dev"
+            )
         self.pdf_fallback = LegacyPdfParser()
 
     @property

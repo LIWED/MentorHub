@@ -366,9 +366,10 @@ def split_markdown_documents(
         ]
         parts = [p for p in parts if p]
         chunk.metadata["heading_path"] = " > ".join(parts)
-        chunk.metadata["source_name"] = (
-            f"{filename} > {' > '.join(parts)}" if parts else filename
-        )
+        # source_name 对应 Milvus 中 max_length=256 的稳定来源字段。
+        # 标题层级已单独保存到 heading_path，不再重复拼进 source_name，
+        # 避免 PPT / MinerU 产生超长标题时导致写入 Milvus 失败。
+        chunk.metadata["source_name"] = filename
 
     print(f"  [MD]  分块完成：{len(docs)} 个文件 → {len(final_chunks)} 个 chunk")
     return final_chunks
@@ -623,6 +624,7 @@ async def build_pipeline(
     use_context: bool = False,
     document_type: str = "",
     relative_path: str = "",
+    parsed_document=None,
 ) -> dict:
     """
     知识库建库完整流水线（五步）：
@@ -644,7 +646,11 @@ async def build_pipeline(
 
     # Step 1：读取
     print("📖 Step 1/4  读取文档…")
-    parsed = parse_document(file_path, document_id=document_id)
+    parsed = (
+        parsed_document
+        if parsed_document is not None
+        else parse_document(file_path, document_id=document_id)
+    )
     docs = parsed.documents
 
     # Step 2：分块

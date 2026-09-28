@@ -222,7 +222,7 @@ class KnowledgeBaseClient:
                 "document_id": c.document_id,
                 "course_id": c.course_id,
                 "tenant_id": c.tenant_id,
-                "source_name": c.source_name,
+                "source_name": c.source_name[:256],
                 "chunk_type": c.chunk_type,
                 "version": c.version,
                 "document_type": c.document_type,
