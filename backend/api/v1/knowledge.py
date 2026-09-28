@@ -235,11 +235,32 @@ def _run_pipeline_sync(
     document_type: str,
     relative_path: str,
 ) -> dict:
-    # BM25 当前按全库重建；串行化写入，避免两个后台 ingestion 同时覆盖稀疏权重。
-    with _index_lock:
-        # 延迟导入，避免 API 启动阶段加载 ingestion 脚本及其本地模型依赖。
-        from scripts.build_knowledge_base import build_pipeline
+    # 延迟导入，避免 API 启动阶段加载 ingestion 脚本及其本地模型依赖。
+    from backend.config import get_settings
+    from scripts.build_knowledge_base import build_pipeline, parse_document
 
+    parser_mode = (get_settings().parser_mode or "local").strip().lower()
+
+    if parser_mode == "colab_dev":
+        # 远程解析不占本机模型资源，允许多个文档同时提交到 Colab 队列。
+        # 只有本地 Chunk/Embedding/BM25/Milvus 阶段继续串行，避免索引重建互相覆盖。
+        parsed = parse_document(file_path, document_id=document_id)
+        with _index_lock:
+            return asyncio.run(
+                build_pipeline(
+                    file_path=file_path,
+                    course_id=course_id,
+                    document_id=document_id,
+                    tenant_id=tenant_id,
+                    use_context=False,
+                    document_type=document_type,
+                    relative_path=relative_path,
+                    parsed_document=parsed,
+                )
+            )
+
+    # 本地 MinerU 仍保持整个流水线串行，避免多个本地解析任务争抢 CPU/GPU。
+    with _index_lock:
         return asyncio.run(
             build_pipeline(
                 file_path=file_path,
@@ -352,7 +373,21 @@ async def _ingest_document(document_id: str, tenant_id: str) -> None:
 
 
 async def _ingest_batch(document_ids: list[str], tenant_id: str) -> None:
-    # 同一批次顺序处理：既减少本地模型争用，也与当前全库 BM25 重建策略一致。
+    from backend.config import get_settings
+
+    parser_mode = (get_settings().parser_mode or "local").strip().lower()
+    if parser_mode == "colab_dev":
+        # Colab 解析本身在远端，允许同一批次并行提交多个解析 Job。
+        # 解析完成后的本地 Chunk/Embedding/BM25/Milvus 仍由 _index_lock 串行化。
+        await asyncio.gather(
+            *[
+                _ingest_document(document_id, tenant_id)
+                for document_id in document_ids
+            ]
+        )
+        return
+
+    # 本地 MinerU 保持顺序处理，避免同时争抢本机 CPU/GPU。
     for document_id in document_ids:
         await _ingest_document(document_id, tenant_id)
 

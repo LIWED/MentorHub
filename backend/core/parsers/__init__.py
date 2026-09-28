@@ -1,4 +1,5 @@
 from backend.core.parsers.base import DocumentParser, ParsedDocument
+from backend.core.parsers.colab_dev import ColabDevParser, ColabDevParserError
 from backend.core.parsers.markdown_images import (
     MarkdownImageResolution,
     MarkdownImageResolver,
@@ -15,6 +16,8 @@ from backend.core.parsers.registry import ParserRegistry, get_parser_registry
 __all__ = [
     "DocumentParser",
     "ParsedDocument",
+    "ColabDevParser",
+    "ColabDevParserError",
     "MarkdownImageResolution",
     "MarkdownImageResolver",
     "MINERU_EXTENSIONS",

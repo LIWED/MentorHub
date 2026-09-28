@@ -58,7 +58,7 @@ def test_markdown_parser_and_splitter_keep_heading_context(tmp_path: Path):
 
     assert parsed.parser_name == "markdown"
     assert chunks
-    assert any("RAG" in chunk.metadata.get("source_name", "") for chunk in chunks)
+    assert any("RAG" in chunk.metadata.get("heading_path", "") for chunk in chunks)
     assert all(chunk.metadata.get("content_format") == "markdown" for chunk in chunks)
 
 
@@ -85,6 +85,25 @@ def test_consecutive_headings_do_not_create_heading_only_chunk():
     assert chunks[0].metadata["H2"] == "一、背景介绍"
     assert chunks[0].metadata["heading_path"] == "1.1 项目介绍 > 一、背景介绍"
     assert "这里是真正的项目背景正文" in chunks[0].page_content
+
+
+def test_long_heading_is_kept_in_heading_path_not_source_name():
+    long_heading = "超长章节" * 80
+    doc = Document(
+        page_content=f"# {long_heading}\n\n正文内容。",
+        metadata={
+            "source": "lesson.pptx",
+            "source_name": "lesson.pptx",
+            "parser": "mineru",
+            "content_format": "markdown",
+        },
+    )
+
+    chunks = split_markdown_documents([doc], chunk_size=512, chunk_overlap=100)
+
+    assert chunks
+    assert chunks[0].metadata["source_name"] == "lesson.pptx"
+    assert chunks[0].metadata["heading_path"] == long_heading
 
 
 def test_markdown_local_image_is_enriched_and_survives_chunking(tmp_path: Path):
@@ -334,7 +353,7 @@ def test_code_aware_chunking_preserves_code_fences_and_indentation():
     assert all("    return result" in chunk.page_content for chunk in code_chunks)
     assert all(chunk.metadata.get("code_language") == "python" for chunk in code_chunks)
     assert all(chunk.metadata.get("H1") == "ReAct 实现" for chunk in code_chunks)
-    assert any("ReAct 实现" in chunk.metadata.get("source_name", "") for chunk in chunks)
+    assert any("ReAct 实现" in chunk.metadata.get("heading_path", "") for chunk in chunks)
 
 
 def test_markdown_placeholder_only_image_is_not_enriched(tmp_path: Path):

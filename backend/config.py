@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     mineru_output_root: str = "./data/mineru"
     mineru_timeout_seconds: int = 900
     mineru_model_source: str = ""  # 可选：modelscope / huggingface
+    parser_mode: str = "local"  # local / colab_dev
+    colab_parser_job_root: str = ""  # Google Drive for desktop 同步目录
+    colab_parser_poll_seconds: float = 3.0
+    colab_parser_timeout_seconds: int = 1800
 
     # ── 知识库上传（仅离线 ingestion 阶段）──
     # 前端上传的课程资料会按 tenant/course/relative_path 原样保存，

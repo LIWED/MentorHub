@@ -9,7 +9,7 @@ MentorHub 采用 **FastAPI + LangGraph + Vue 3** 的前后端架构。后端将�
 | 模块 | 主要能力 | 关键实现 |
 | --- | --- | --- |
 | **KnowFlow · 课程知识问答** | 课程知识库问答、通用问题处理、联网搜索兜底、多轮上下文 | Query Rewrite、Metadata Scoped Search、SINGLE/BROAD/ITERATIVE、HyDE、Hybrid Retrieval、BGE Rerank、Evidence Sufficiency、Gap Retrieval、Citation / Evidence Trace、MCP Web Search、Memory |
-| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、代码感知分块 | Parser Registry、MinerU 独立环境、MarkdownImageResolver、HTML Image Enrichment、Hierarchy-aware / Code-aware Chunking、BGE-M3 + BM25 |
+| **Document Ingestion · 知识入库** | Markdown / PDF / 图片 / Office / HTML 等文档解析、结构化入库、图片增强、层级/代码感知分块 | Parser Registry、MinerU 独立环境、Colab Dev Parser、MarkdownImageResolver、HTML Image Enrichment、Hierarchy-aware / Code-aware Chunking、BGE-M3 + BM25 |
 | **Knowledge Management · 知识库管理** | 管理员创建/删除课程、上传多文件/完整文件夹、查看解析状态并补充资料 | Course → Document → Chunk、相对路径保留、sitemap 识别、异步入库、启动恢复、Chunk Preview、Retrieval Testing、重新解析/删除 |
 | **Exam · 智能试卷批改** | 客观题、简答题、代码题自动批改，薄弱点分析，教师复核 | 三轨并行批改、LLM 结构化评分、低置信度人工复核、HitL |
 | **ResumePilot · 简历评审** | PDF 简历解析、六维度评分、问题诊断、改进建议 | Structured Output、`asyncio.gather` 并行评审、Think → Diagnose、加权评分 |
@@ -148,6 +148,25 @@ MinerU 独立环境     → requirements-mineru.txt
 ```
 
 PDF 若 MinerU 不可用或解析失败，会降级到 `LegacyPdfParser / PyPDFLoader`；其它富文档则保留显式错误，避免静默丢失复杂内容。
+
+### Colab Dev Parser（仅本地开发）
+
+为了避免开发测试时 MinerU / 图片解析长期占用本机资源，可把富文档解析临时切到 Google Colab；正式默认行为仍是本地解析。
+
+```env
+PARSER_MODE=colab_dev
+COLAB_PARSER_JOB_ROOT=<Google Drive for desktop 同步目录>/MentorHub-Colab
+COLAB_PARSER_POLL_SECONDS=3
+COLAB_PARSER_TIMEOUT_SECONDS=1800
+```
+
+本地会自动把源文档与其本地图片依赖打成 ZIP 放入 Drive `pending/`；Colab Notebook `notebooks/MentorHub_Colab_Parser.ipynb` 自动消费任务，在 `/content` 中运行 MinerU，再把精简结果写回 `done/`。队列采用 `pending -> processing -> done / failed`，并额外写入 `status/` 便于观察任务状态；Colab Runtime 中断后，遗留的 `processing` 任务会在 Worker 重启时重新入队。
+
+`colab_dev` 模式允许多个文档同时提交远程解析；结果返回后，本地 Chunking / Embedding / BM25 / Milvus 仍串行写索引，避免稀疏权重重建互相覆盖。远程解析完成并不等于整条入库完成，最终仍以本地索引阶段成功为准。
+
+PPT / Office 文档经 MinerU 解析后可能产生很长的标题层级，因此 `source_name` 只保存稳定的文件/页来源，完整层级单独保存在 `heading_path` 并参与 `retrieval_text`；Milvus 写入端同时对 `source_name` 做 256 字符兜底，避免远端解析成功后因元数据过长导致本地入库失败。
+
+`colab_dev` 超时或远程失败时**不会偷偷退回本地 MinerU**，避免本机资源突然被重新占满。切换 `PARSER_MODE` 后需要重启 Backend。该模式仅用于本地开发测试，不作为正式部署依赖。
 
 ### Markdown / HTML 图片
 
@@ -363,7 +382,7 @@ MentorHub/
 │  │  ├─ query_classifier.py   # QA Query 二分类
 │  │  ├─ memory.py             # 多轮上下文与摘要
 │  │  ├─ runtime_settings.py   # 管理员运行时检索 / API 设置
-│  │  ├─ parsers/              # Parser Registry / MinerU / Markdown+HTML 图片解析
+│  │  ├─ parsers/              # Parser Registry / MinerU / Colab Dev Parser / 图片解析
 │  │  └─ retry.py              # 重试 / 降级
 │  ├─ mcp/
 │  │  ├─ knowledge_base_server.py
@@ -376,12 +395,16 @@ MentorHub/
 │  ├─ init_milvus.py
 │  ├─ build_knowledge_base.py
 │  ├─ mineru_parse_worker.py   # 独立 MinerU 环境解析 Worker
+│  ├─ colab_parse_job.py       # Colab 单任务解析入口
+│  ├─ colab_queue_worker.py    # Drive 队列消费 Worker
 │  ├─ test_document_extract.py # 文档解析独立 smoke test
 │  ├─ manual_tests/
 │  │  └─ test_document_ingestion.py # Parser + Chunking 人工质量检查
 │  ├─ ollama_image_understanding_worker.py # 流程图视觉理解实验
 │  ├─ seed_data.py
 │  └─ seed_standard_exam.py
+├─ notebooks/
+│  └─ MentorHub_Colab_Parser.ipynb # 开发期 Colab 解析 Worker
 ├─ tests/
 │  ├─ parsers/
 │  ├─ qa/
@@ -627,6 +650,12 @@ Parser / 文档入库与 QA Retrieval：
 pytest tests/parsers tests/qa -q
 ```
 
+Colab Dev Parser 队列与结果导入：
+
+```bash
+pytest tests/parsers/test_colab_dev_parser.py tests/parsers/test_colab_queue_worker.py -q
+```
+
 完整后端回归：
 
 ```bash
@@ -663,8 +692,10 @@ MentorHub 仍处于持续开发阶段。README 以当前仓库代码为准，重
 
 - **Contextual RAG**：代码保留，但默认关闭，只在需要时显式开启；
 - **MinerU**：只用于离线知识入库，不进入在线 QA 请求链路；
+- **Colab Dev Parser**：仅作为本地开发时的 MinerU 远程加速器；正式默认仍为本地解析。远端只负责解析，Chunking、Hierarchy-aware Retrieval Text、Embedding、BM25 与 Milvus 索引仍由本地 MentorHub 完成；
 - **Markdown / HTML 图片**：已进入正式入库链路，优先 Advanced 图像解析，低价值结果可降级 OCR；源图片不存在时明确记录失败，不生成伪造描述；
 - **Code-aware Chunking**：Markdown / HTML 代码块使用独立的更大窗口，并保留代码围栏、缩进、语言与章节信息；
+- **Hierarchy-aware Retrieval**：标题层级保存在 `heading_path`，并与文档路径、原始正文共同构造 `retrieval_text`；Dense / BM25 / Reranker 使用增强文本，最终回答与 Citation 仍使用原始 `content`；
 - **Runtime Settings**：管理员可热更新 QA Top-K、置信度、Gap Retrieval、LLM 与 Web Search 配置；当前使用本地 `.runtime_settings.json` overlay，适合单实例部署；
 - **复杂流程图 / 架构图**：节点关系恢复仍在优化，`scripts/ollama_image_understanding_worker.py` 属于实验代码，目前未作为默认生产能力接入；
 - **Parent-Child Retrieval**：当前没有启用，现阶段使用 Heading/Code-aware Chunking + Hybrid Retrieval + Rerank + Sufficiency/Gap Retrieval。
